@@ -1,0 +1,27 @@
+.env
+.env.local
+.env.*.local
+
+# Go binary'leri
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+main
+
+# Test dosyaları
+*.test
+
+# Build çıktıları
+*.out
+bin/
+
+# Editör dosyaları
+.vscode/
+.idea/
+*.swp
+
+# İşletim sistemi
+.DS_Store
+Thumbs.db
