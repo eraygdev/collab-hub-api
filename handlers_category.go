@@ -15,7 +15,7 @@ func handleListCategories(c *gin.Context) {
 		ORDER BY name ASC
 	`)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		serverError(c, err, "")
 		return
 	}
 	defer rows.Close()
@@ -26,7 +26,7 @@ func handleListCategories(c *gin.Context) {
 		var name, slug string
 
 		if err := rows.Scan(&id, &name, &slug); err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			serverError(c, err, "")
 			return
 		}
 

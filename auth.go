@@ -21,17 +21,27 @@ func initOAuth() {
 	googleOauthConfig = &oauth2.Config{
 		ClientID:     os.Getenv("GOOGLE_CLIENT_ID"),
 		ClientSecret: os.Getenv("GOOGLE_CLIENT_SECRET"),
-		RedirectURL:  os.Getenv("GOOGLE_REDIRECT_URL"),
+		RedirectURL:  os.Getenv("GOOGLE_OAUTH_REDIRECT_URL"),
 		Scopes:       []string{"openid", "email", "profile"},
 		Endpoint:     google.Endpoint,
 	}
 	githubOauthConfig = &oauth2.Config{
 		ClientID:     os.Getenv("GITHUB_CLIENT_ID"),
 		ClientSecret: os.Getenv("GITHUB_CLIENT_SECRET"),
-		RedirectURL:  os.Getenv("GITHUB_REDIRECT_URL"),
+		RedirectURL:  os.Getenv("GITHUB_OAUTH_REDIRECT_URL"),
 		Scopes:       []string{"read:user", "user:email"},
 		Endpoint:     github.Endpoint,
 	}
+}
+
+// UTF-8 güvenli truncate: karakter sayısına göre keser.
+// Multi-byte karakterleri (Türkçe ş/ğ/ü vb.) ortadan kesmez.
+func truncateRunes(s string, max int) string {
+	runes := []rune(s)
+	if len(runes) <= max {
+		return s
+	}
+	return string(runes[:max])
 }
 
 // Kullanıcı için 7 gün geçerli imzalı JWT token üretir (avatar_url dahil).
@@ -75,9 +85,21 @@ func authMiddleware() gin.HandlerFunc {
 			c.Abort()
 			return
 		}
-		c.Set("user_id", int(claims["user_id"].(float64)))
-		c.Set("email", claims["email"].(string))
-		c.Set("username", claims["username"].(string))
+
+		// Güvenli claims okuma (panic riski yok)
+		if uid, ok := claims["user_id"].(float64); ok {
+			c.Set("user_id", int(uid))
+		} else {
+			c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid user_id"})
+			c.Abort()
+			return
+		}
+		if email, ok := claims["email"].(string); ok {
+			c.Set("email", email)
+		}
+		if username, ok := claims["username"].(string); ok {
+			c.Set("username", username)
+		}
 		if av, ok := claims["avatar_url"].(string); ok {
 			c.Set("avatar_url", av)
 		}

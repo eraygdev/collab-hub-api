@@ -52,26 +52,29 @@ func handleGoogleCallback(c *gin.Context) {
 		name = email
 	}
 
-	// DB sınırı: username VARCHAR(50)
-	if len(name) > 50 {
-		name = name[:50]
-	}
+	// DB sınırı: username VARCHAR(30) — UTF-8 güvenli truncate
+	name = truncateRunes(name, MaxUsernameLen)
 
-	var userID int
+	var (
+		userID     int
+		dbUsername string
+		dbAvatar   string
+	)
 	err = db.QueryRow(context.Background(), `
 		INSERT INTO users (username, email, google_id, avatar_url)
 		VALUES ($1, $2, $3, $4)
 		ON CONFLICT (email) DO UPDATE
 		SET google_id = EXCLUDED.google_id,
 		    avatar_url = COALESCE(EXCLUDED.avatar_url, users.avatar_url)
-		RETURNING id
-	`, name, email, googleID, picture).Scan(&userID)
+		RETURNING id, username, COALESCE(avatar_url, '')
+	`, name, email, googleID, picture).Scan(&userID, &dbUsername, &dbAvatar)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
 
-	jwtToken, err := generateJWT(userID, email, name, picture)
+	// JWT'ye DB'deki GERÇEK username ve avatar yazılsın
+	jwtToken, err := generateJWT(userID, email, dbUsername, dbAvatar)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
@@ -152,28 +155,29 @@ func handleGithubCallback(c *gin.Context) {
 		login = fmt.Sprintf("github_%d", githubID)
 	}
 
-	// DB sınırı: username ve github_login VARCHAR(50)
-	if len(login) > 50 {
-		login = login[:50]
-	}
+	// DB sınırı: username VARCHAR(30) — UTF-8 güvenli truncate
+	login = truncateRunes(login, MaxUsernameLen)
 
-	var userID int
+	var (
+		userID     int
+		dbUsername string
+		dbAvatar   string
+	)
 	err = db.QueryRow(context.Background(), `
-		INSERT INTO users (username, email, github_id, github_login, avatar_url, bio)
-		VALUES ($1, $2, $3, $4, $5, $6)
+		INSERT INTO users (username, email, github_id, avatar_url, bio)
+		VALUES ($1, $2, $3, $4, $5)
 		ON CONFLICT (email) DO UPDATE
 		SET github_id = EXCLUDED.github_id,
-		    github_login = EXCLUDED.github_login,
-		    avatar_url = COALESCE(EXCLUDED.avatar_url, users.avatar_url),
-		    bio = COALESCE(EXCLUDED.bio, users.bio)
-		RETURNING id
-	`, login, email, githubID, login, avatar, bio).Scan(&userID)
+			avatar_url = COALESCE(EXCLUDED.avatar_url, users.avatar_url)
+		RETURNING id, username, COALESCE(avatar_url, '')
+	`, login, email, githubID, avatar, bio).Scan(&userID, &dbUsername, &dbAvatar)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
 
-	jwtToken, err := generateJWT(userID, email, login, avatar)
+	// JWT'ye DB'deki GERÇEK username ve avatar yazılsın
+	jwtToken, err := generateJWT(userID, email, dbUsername, dbAvatar)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
