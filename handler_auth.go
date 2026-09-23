@@ -52,6 +52,11 @@ func handleGoogleCallback(c *gin.Context) {
 		name = email
 	}
 
+	// DB sınırı: username VARCHAR(50)
+	if len(name) > 50 {
+		name = name[:50]
+	}
+
 	var userID int
 	err = db.QueryRow(context.Background(), `
 		INSERT INTO users (username, email, google_id, avatar_url)
@@ -147,16 +152,22 @@ func handleGithubCallback(c *gin.Context) {
 		login = fmt.Sprintf("github_%d", githubID)
 	}
 
+	// DB sınırı: username ve github_login VARCHAR(50)
+	if len(login) > 50 {
+		login = login[:50]
+	}
+
 	var userID int
 	err = db.QueryRow(context.Background(), `
-		INSERT INTO users (username, email, github_id, avatar_url, bio)
-		VALUES ($1, $2, $3, $4, $5)
+		INSERT INTO users (username, email, github_id, github_login, avatar_url, bio)
+		VALUES ($1, $2, $3, $4, $5, $6)
 		ON CONFLICT (email) DO UPDATE
 		SET github_id = EXCLUDED.github_id,
+		    github_login = EXCLUDED.github_login,
 		    avatar_url = COALESCE(EXCLUDED.avatar_url, users.avatar_url),
 		    bio = COALESCE(EXCLUDED.bio, users.bio)
 		RETURNING id
-	`, login, email, githubID, avatar, bio).Scan(&userID)
+	`, login, email, githubID, login, avatar, bio).Scan(&userID)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return

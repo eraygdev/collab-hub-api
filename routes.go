@@ -27,6 +27,15 @@ func registerRoutes(router *gin.Engine) {
 
 	// Projeler
 	router.GET("/api/projects", handleListProjects)
+	router.GET("/api/projects/:id", handleGetProject)
 	router.POST("/api/projects", authMiddleware(), handleCreateProject)
 	router.GET("/api/me/projects", authMiddleware(), handleMyProjects)
+	router.GET("/api/me/projects/detailed", authMiddleware(), handleMyProjectsDetailed)
+
+	// Kategoriler (public)
+	router.GET("/api/categories", handleListCategories)
+
+	// Yıldız (YENİ)
+	router.POST("/api/projects/:id/star", authMiddleware(), handleStarProject)
+	router.DELETE("/api/projects/:id/star", authMiddleware(), handleUnstarProject)
 }
