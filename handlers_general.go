@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/gin-gonic/gin"
 	"github.com/jackc/pgx/v5"
@@ -68,20 +69,21 @@ func handleUpdateMe(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "username boş olamaz"})
 		return
 	}
-	if len(input.Username) > MaxUsernameLen {
+	// ✅ utf8.RuneCountInString
+	if utf8.RuneCountInString(input.Username) > MaxUsernameLen {
 		c.JSON(http.StatusBadRequest, gin.H{
 			"error": fmt.Sprintf("username en fazla %d karakter olabilir", MaxUsernameLen),
 		})
 		return
 	}
-	if len(input.Bio) > MaxBioLen {
+	if utf8.RuneCountInString(input.Bio) > MaxBioLen {
 		c.JSON(http.StatusBadRequest, gin.H{
 			"error": fmt.Sprintf("bio en fazla %d karakter olabilir", MaxBioLen),
 		})
 		return
 	}
 
-	// 1) Önce başka biri tarafından kullanılıyor mu? (erken uyarı için)
+	// 1) Önce başka biri tarafından kullanılıyor mu?
 	var existingID int
 	err := db.QueryRow(context.Background(),
 		`SELECT id FROM users WHERE username = $1 AND id != $2`,
@@ -89,17 +91,15 @@ func handleUpdateMe(c *gin.Context) {
 	).Scan(&existingID)
 
 	if err == nil {
-		// Kullanıcı bulundu → çakışma
 		c.JSON(http.StatusConflict, gin.H{"error": "bu kullanıcı adı zaten alınmış"})
 		return
 	}
 	if !errors.Is(err, pgx.ErrNoRows) {
-		// Beklenmedik DB hatası
 		serverError(c, err, "")
 		return
 	}
 
-	// 2) UPDATE — DB'de UNIQUE constraint varsa race condition burada yakalanır.
+	// 2) UPDATE
 	_, err = db.Exec(context.Background(), `
 		UPDATE users
 		SET username = $1, bio = $2
@@ -107,7 +107,6 @@ func handleUpdateMe(c *gin.Context) {
 	`, input.Username, input.Bio, userID)
 
 	if err != nil {
-		// UNIQUE ihlali → 409
 		if isUniqueViolation(err) {
 			c.JSON(http.StatusConflict, gin.H{"error": "bu kullanıcı adı zaten alınmış"})
 			return
@@ -115,6 +114,8 @@ func handleUpdateMe(c *gin.Context) {
 		serverError(c, err, "")
 		return
 	}
+
+	auditLog(c, userID, "update", "user", userID)
 
 	c.JSON(http.StatusOK, gin.H{
 		"message":  "profil güncellendi",
@@ -124,7 +125,6 @@ func handleUpdateMe(c *gin.Context) {
 }
 
 // PostgreSQL UNIQUE ihlalini tespit eder.
-// pgconn.PgError kodu "23505" = unique_violation
 func isUniqueViolation(err error) bool {
 	if err == nil {
 		return false

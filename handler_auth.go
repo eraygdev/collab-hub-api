@@ -13,13 +13,11 @@ import (
 
 // ---------- GOOGLE ----------
 
-// Kullanıcıyı Google giriş sayfasına yönlendirir.
 func handleGoogleLogin(c *gin.Context) {
 	url := googleOauthConfig.AuthCodeURL("state-google")
 	c.Redirect(http.StatusTemporaryRedirect, url)
 }
 
-// Google'dan dönen code'u token'a çevirir, kullanıcıyı DB'ye yazar, JWT ile frontend'e yollar.
 func handleGoogleCallback(c *gin.Context) {
 	code := c.Query("code")
 	token, err := googleOauthConfig.Exchange(c.Request.Context(), code)
@@ -52,13 +50,11 @@ func handleGoogleCallback(c *gin.Context) {
 		name = email
 	}
 
-	// DB sınırı: username VARCHAR(30) — UTF-8 güvenli truncate
 	name = truncateRunes(name, MaxUsernameLen)
 
 	var (
 		userID     int
 		dbUsername string
-		dbAvatar   string
 	)
 	err = db.QueryRow(context.Background(), `
 		INSERT INTO users (username, email, google_id, avatar_url)
@@ -66,15 +62,17 @@ func handleGoogleCallback(c *gin.Context) {
 		ON CONFLICT (email) DO UPDATE
 		SET google_id = EXCLUDED.google_id,
 		    avatar_url = COALESCE(EXCLUDED.avatar_url, users.avatar_url)
-		RETURNING id, username, COALESCE(avatar_url, '')
-	`, name, email, googleID, picture).Scan(&userID, &dbUsername, &dbAvatar)
+		RETURNING id, username
+	`, name, email, googleID, picture).Scan(&userID, &dbUsername)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
 
-	// JWT'ye DB'deki GERÇEK username ve avatar yazılsın
-	jwtToken, err := generateJWT(userID, email, dbUsername, dbAvatar)
+	// Audit log: login
+	auditLog(c, userID, "login", "user", userID)
+
+	jwtToken, err := generateJWT(userID, email, dbUsername)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
@@ -86,13 +84,11 @@ func handleGoogleCallback(c *gin.Context) {
 
 // ---------- GITHUB ----------
 
-// Kullanıcıyı GitHub giriş sayfasına yönlendirir.
 func handleGithubLogin(c *gin.Context) {
 	url := githubOauthConfig.AuthCodeURL("state-github")
 	c.Redirect(http.StatusTemporaryRedirect, url)
 }
 
-// GitHub'dan dönen code'u token'a çevirir, kullanıcıyı DB'ye yazar, JWT ile frontend'e yollar.
 func handleGithubCallback(c *gin.Context) {
 	code := c.Query("code")
 	token, err := githubOauthConfig.Exchange(c.Request.Context(), code)
@@ -155,13 +151,11 @@ func handleGithubCallback(c *gin.Context) {
 		login = fmt.Sprintf("github_%d", githubID)
 	}
 
-	// DB sınırı: username VARCHAR(30) — UTF-8 güvenli truncate
 	login = truncateRunes(login, MaxUsernameLen)
 
 	var (
 		userID     int
 		dbUsername string
-		dbAvatar   string
 	)
 	err = db.QueryRow(context.Background(), `
 		INSERT INTO users (username, email, github_id, avatar_url, bio)
@@ -169,15 +163,17 @@ func handleGithubCallback(c *gin.Context) {
 		ON CONFLICT (email) DO UPDATE
 		SET github_id = EXCLUDED.github_id,
 			avatar_url = COALESCE(EXCLUDED.avatar_url, users.avatar_url)
-		RETURNING id, username, COALESCE(avatar_url, '')
-	`, login, email, githubID, avatar, bio).Scan(&userID, &dbUsername, &dbAvatar)
+		RETURNING id, username
+	`, login, email, githubID, avatar, bio).Scan(&userID, &dbUsername)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
 
-	// JWT'ye DB'deki GERÇEK username ve avatar yazılsın
-	jwtToken, err := generateJWT(userID, email, dbUsername, dbAvatar)
+	// Audit log: login
+	auditLog(c, userID, "login", "user", userID)
+
+	jwtToken, err := generateJWT(userID, email, dbUsername)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return

@@ -4,32 +4,17 @@ import (
 	"context"
 	"fmt"
 	"net/http"
-	"os"
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/gin-gonic/gin"
-	"github.com/golang-jwt/jwt/v5"
 )
 
-// Tüm projeleri hafif liste olarak döner (arama + kategori + sayfalama).
+// Tüm projeleri hafif liste olarak döner (arama + kategori ID + sayfalama).
 func handleListProjects(c *gin.Context) {
-	userID := 0
-	authHeader := c.GetHeader("Authorization")
-	if authHeader != "" && len(authHeader) > 7 {
-		tokenString := authHeader[7:]
-		token, err := jwt.Parse(tokenString, func(t *jwt.Token) (interface{}, error) {
-			return []byte(os.Getenv("JWT_SECRET")), nil
-		})
-		if err == nil && token.Valid {
-			if claims, ok := token.Claims.(jwt.MapClaims); ok {
-				if uid, ok := claims["user_id"].(float64); ok {
-					userID = int(uid)
-				}
-			}
-		}
-	}
+	userID := c.GetInt("user_id")
 
 	// Sayfalama
 	limit := 20
@@ -48,42 +33,44 @@ func handleListProjects(c *gin.Context) {
 	// Arama
 	search := strings.TrimSpace(c.Query("search"))
 
-	// Arama uzunluğu kontrolü
-	if len(search) > MaxSearchLen {
+	// ✅ Rune bazlı sayım (Türkçe karakterler 1 sayılsın)
+	if utf8.RuneCountInString(search) > MaxSearchLen {
 		c.JSON(http.StatusBadRequest, gin.H{
 			"error": fmt.Sprintf("arama metni en fazla %d karakter olabilir", MaxSearchLen),
 		})
 		return
 	}
 
-	// Wildcard escape (%, _ ve \ karakterlerini literal yap)
 	if search != "" {
 		search = strings.ReplaceAll(search, "\\", "\\\\")
 		search = strings.ReplaceAll(search, "%", "\\%")
 		search = strings.ReplaceAll(search, "_", "\\_")
 	}
 
-	// Kategoriler: "Backend,AI" → []string{"Backend", "AI"}
-	var categoryNames []string
-	if catQuery := c.Query("categories"); catQuery != "" {
+	// Kategoriler
+	var categoryIDs []int
+	if catQuery := c.Query("categoryIds"); catQuery != "" {
 		for _, s := range strings.Split(catQuery, ",") {
-			name := strings.TrimSpace(s)
-			if name != "" {
-				categoryNames = append(categoryNames, name)
+			idStr := strings.TrimSpace(s)
+			if idStr == "" {
+				continue
 			}
+			id, err := strconv.Atoi(idStr)
+			if err != nil || id <= 0 {
+				c.JSON(http.StatusBadRequest, gin.H{"error": "geçersiz kategori id"})
+				return
+			}
+			categoryIDs = append(categoryIDs, id)
 		}
 	}
 
-	// Kategori sayısı kontrolü (kötüye kullanım)
-	if len(categoryNames) > 20 {
+	if len(categoryIDs) > 20 {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "en fazla 20 kategori seçilebilir"})
 		return
 	}
 
-	// Match mode: 'or' (default) | 'and'
 	matchMode := c.DefaultQuery("mode", "or")
 
-	// Dinamik WHERE koşulları
 	conditions := []string{}
 	args := []interface{}{userID}
 	argIdx := 2
@@ -97,28 +84,26 @@ func handleListProjects(c *gin.Context) {
 		argIdx++
 	}
 
-	if len(categoryNames) > 0 {
+	if len(categoryIDs) > 0 {
 		if matchMode == "and" {
-			for _, catName := range categoryNames {
+			for _, catID := range categoryIDs {
 				conditions = append(conditions, fmt.Sprintf(`
 					EXISTS (
 						SELECT 1 FROM project_categories pc2
-						JOIN categories c2 ON c2.id = pc2.category_id
-						WHERE pc2.project_id = p.id AND c2.name = $%d
+						WHERE pc2.project_id = p.id AND pc2.category_id = $%d
 					)
 				`, argIdx))
-				args = append(args, catName)
+				args = append(args, catID)
 				argIdx++
 			}
 		} else {
 			conditions = append(conditions, fmt.Sprintf(`
 				EXISTS (
 					SELECT 1 FROM project_categories pc2
-					JOIN categories c2 ON c2.id = pc2.category_id
-					WHERE pc2.project_id = p.id AND c2.name = ANY($%d)
+					WHERE pc2.project_id = p.id AND pc2.category_id = ANY($%d)
 				)
 			`, argIdx))
-			args = append(args, categoryNames)
+			args = append(args, categoryIDs)
 			argIdx++
 		}
 	}
@@ -128,31 +113,39 @@ func handleListProjects(c *gin.Context) {
 		whereClause = "WHERE " + strings.Join(conditions, " AND ")
 	}
 
-	// LIMIT ve OFFSET
 	limitIdx := argIdx
 	offsetIdx := argIdx + 1
 	args = append(args, limit, offset)
 
-	// NOT: LEFT JOIN + GROUP BY yerine scalar subquery kullanıyoruz.
-	// Böylece LIMIT/OFFSET fan-out yapmaz, sayfalama doğru çalışır.
+	// LATERAL join: subquery'leri tek seferde topla
 	query := fmt.Sprintf(`
 		SELECT 
 			p.id, p.title, p.description,
 			COALESCE(p.image_url, '') AS image_url,
-			(SELECT COUNT(*) FROM project_stars WHERE project_id = p.id) AS stars,
-			EXISTS(SELECT 1 FROM project_stars WHERE project_id = p.id AND user_id = $1) AS starred,
+			COALESCE(s.stars, 0) AS stars,
+			COALESCE(s.starred, false) AS starred,
 			COALESCE(u.username, '') AS author,
 			COALESCE(u.avatar_url, '') AS author_avatar,
 			COALESCE(u.id, 0) AS author_id,
-			COALESCE(
-				(SELECT ARRAY_AGG(c.name ORDER BY c.name)
-				 FROM project_categories pc
-				 JOIN categories c ON c.id = pc.category_id
-				 WHERE pc.project_id = p.id),
-				ARRAY[]::varchar[]
-			) AS categories
+			COALESCE(cat.names, ARRAY[]::varchar[]) AS categories,
+			COALESCE(cat.ids, ARRAY[]::int[]) AS category_ids
 		FROM projects p
 		LEFT JOIN users u ON u.id = p.author_id
+		LEFT JOIN LATERAL (
+			SELECT 
+				COUNT(*) AS stars,
+				BOOL_OR(user_id = $1) AS starred
+			FROM project_stars
+			WHERE project_id = p.id
+		) s ON true
+		LEFT JOIN LATERAL (
+			SELECT 
+				ARRAY_AGG(c.name ORDER BY c.name) AS names,
+				ARRAY_AGG(pc.category_id ORDER BY pc.category_id) AS ids
+			FROM project_categories pc
+			JOIN categories c ON c.id = pc.category_id
+			WHERE pc.project_id = p.id
+		) cat ON true
 		%s
 		ORDER BY p.created_at DESC
 		LIMIT $%d OFFSET $%d
@@ -171,11 +164,12 @@ func handleListProjects(c *gin.Context) {
 		var starred bool
 		var title, description, imageURL, author, authorAvatar string
 		var categories []string
+		var catIDs []int
 
 		err := rows.Scan(
 			&id, &title, &description, &imageURL,
 			&stars, &starred, &author, &authorAvatar, &authorID,
-			&categories,
+			&categories, &catIDs,
 		)
 		if err != nil {
 			serverError(c, err, "")
@@ -184,6 +178,9 @@ func handleListProjects(c *gin.Context) {
 
 		if categories == nil {
 			categories = []string{}
+		}
+		if catIDs == nil {
+			catIDs = []int{}
 		}
 
 		projects = append(projects, map[string]interface{}{
@@ -197,13 +194,14 @@ func handleListProjects(c *gin.Context) {
 			"authorAvatar": authorAvatar,
 			"authorId":     authorID,
 			"categories":   categories,
+			"categoryIds":  catIDs,
 		})
 	}
 
 	c.JSON(http.StatusOK, projects)
 }
 
-// Tek bir projeyi tam detaylarıyla döner (kategoriler ve yıldız bilgisi dahil).
+// Tek bir projeyi tam detaylarıyla döner.
 func handleGetProject(c *gin.Context) {
 	id, err := strconv.Atoi(c.Param("id"))
 	if err != nil {
@@ -211,21 +209,7 @@ func handleGetProject(c *gin.Context) {
 		return
 	}
 
-	userID := 0
-	authHeader := c.GetHeader("Authorization")
-	if authHeader != "" && len(authHeader) > 7 {
-		tokenString := authHeader[7:]
-		token, err := jwt.Parse(tokenString, func(t *jwt.Token) (interface{}, error) {
-			return []byte(os.Getenv("JWT_SECRET")), nil
-		})
-		if err == nil && token.Valid {
-			if claims, ok := token.Claims.(jwt.MapClaims); ok {
-				if uid, ok := claims["user_id"].(float64); ok {
-					userID = int(uid)
-				}
-			}
-		}
-	}
+	userID := c.GetInt("user_id")
 
 	var project struct {
 		ID              int       `json:"id"`
@@ -244,6 +228,7 @@ func handleGetProject(c *gin.Context) {
 		AuthorAvatar    string    `json:"authorAvatar"`
 		AuthorID        int       `json:"authorId"`
 		Categories      []string  `json:"categories"`
+		CategoryIDs     []int     `json:"categoryIds"`
 	}
 
 	err = db.QueryRow(context.Background(), `
@@ -265,7 +250,13 @@ func handleGetProject(c *gin.Context) {
 				 JOIN categories c ON c.id = pc.category_id
 				 WHERE pc.project_id = p.id),
 				ARRAY[]::varchar[]
-			) AS categories
+			) AS categories,
+			COALESCE(
+				(SELECT ARRAY_AGG(pc.category_id ORDER BY pc.category_id)
+				 FROM project_categories pc
+				 WHERE pc.project_id = p.id),
+				ARRAY[]::int[]
+			) AS category_ids
 		FROM projects p
 		LEFT JOIN users u ON u.id = p.author_id
 		WHERE p.id = $1
@@ -274,7 +265,7 @@ func handleGetProject(c *gin.Context) {
 		&project.GithubURL, &project.DemoURL, &project.ImageURL,
 		&project.Stars, &project.Starred, &project.Contributors, &project.Status, &project.CreatedAt,
 		&project.Author, &project.AuthorAvatar, &project.AuthorID,
-		&project.Categories,
+		&project.Categories, &project.CategoryIDs,
 	)
 
 	if err != nil {
@@ -285,12 +276,14 @@ func handleGetProject(c *gin.Context) {
 	if project.Categories == nil {
 		project.Categories = []string{}
 	}
+	if project.CategoryIDs == nil {
+		project.CategoryIDs = []int{}
+	}
 
 	c.JSON(http.StatusOK, project)
 }
 
 // Kategori ID'lerinin geçerli olduğunu doğrular.
-// Geçersiz varsa false döner.
 func validateCategoryIDs(categoryIDs []int) bool {
 	if len(categoryIDs) == 0 {
 		return true
@@ -306,7 +299,7 @@ func validateCategoryIDs(categoryIDs []int) bool {
 	return count == len(categoryIDs)
 }
 
-// Yeni proje oluşturur (giriş yapmış kullanıcı için, kategori desteğiyle).
+// Yeni proje oluşturur.
 func handleCreateProject(c *gin.Context) {
 	userID := c.GetInt("user_id")
 
@@ -325,7 +318,6 @@ func handleCreateProject(c *gin.Context) {
 		return
 	}
 
-	// Zorunlu alanlar
 	if input.Title == "" || input.Description == "" {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "title ve description zorunlu"})
 		return
@@ -335,45 +327,44 @@ func handleCreateProject(c *gin.Context) {
 	input.Description = sanitizeText(input.Description)
 	input.LongDescription = sanitizeText(input.LongDescription)
 
-	// Uzunluk sınırları
-	if len(input.Title) > MaxTitleLen {
+	// ✅ Rune bazlı sayım (Türkçe karakterler 1 sayılsın)
+	if utf8.RuneCountInString(input.Title) > MaxTitleLen {
 		c.JSON(http.StatusBadRequest, gin.H{
 			"error": fmt.Sprintf("title en fazla %d karakter olabilir", MaxTitleLen),
 		})
 		return
 	}
-	if len(input.Description) > MaxDescriptionLen {
+	if utf8.RuneCountInString(input.Description) > MaxDescriptionLen {
 		c.JSON(http.StatusBadRequest, gin.H{
 			"error": fmt.Sprintf("description en fazla %d karakter olabilir", MaxDescriptionLen),
 		})
 		return
 	}
-	if len(input.LongDescription) > MaxLongDescLen {
+	if utf8.RuneCountInString(input.LongDescription) > MaxLongDescLen {
 		c.JSON(http.StatusBadRequest, gin.H{
 			"error": fmt.Sprintf("longDescription en fazla %d karakter olabilir", MaxLongDescLen),
 		})
 		return
 	}
-	if len(input.GithubURL) > MaxGithubURLLen {
+	if utf8.RuneCountInString(input.GithubURL) > MaxGithubURLLen {
 		c.JSON(http.StatusBadRequest, gin.H{
 			"error": fmt.Sprintf("githubUrl en fazla %d karakter olabilir", MaxGithubURLLen),
 		})
 		return
 	}
-	if len(input.DemoURL) > MaxDemoURLLen {
+	if utf8.RuneCountInString(input.DemoURL) > MaxDemoURLLen {
 		c.JSON(http.StatusBadRequest, gin.H{
 			"error": fmt.Sprintf("demoUrl en fazla %d karakter olabilir", MaxDemoURLLen),
 		})
 		return
 	}
-	if len(input.ImageURL) > MaxImageURLLen {
+	if utf8.RuneCountInString(input.ImageURL) > MaxImageURLLen {
 		c.JSON(http.StatusBadRequest, gin.H{
 			"error": fmt.Sprintf("imageUrl en fazla %d karakter olabilir", MaxImageURLLen),
 		})
 		return
 	}
 
-	// URL formatı
 	if input.GithubURL != "" && !strings.HasPrefix(input.GithubURL, "http") {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "githubUrl geçersiz"})
 		return
@@ -387,7 +378,6 @@ func handleCreateProject(c *gin.Context) {
 		return
 	}
 
-	// Kategori sayısı sınırı
 	if len(input.CategoryIDs) > MaxCategories {
 		c.JSON(http.StatusBadRequest, gin.H{
 			"error": fmt.Sprintf("en fazla %d kategori seçilebilir", MaxCategories),
@@ -395,15 +385,20 @@ func handleCreateProject(c *gin.Context) {
 		return
 	}
 
-	// Kategori ID'leri geçerli mi?
 	if !validateCategoryIDs(input.CategoryIDs) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "geçersiz kategori id"})
 		return
 	}
 
-	// Projeyi oluştur
+	tx, err := db.Begin(context.Background())
+	if err != nil {
+		serverError(c, err, "")
+		return
+	}
+	defer tx.Rollback(context.Background())
+
 	var projectID int
-	err := db.QueryRow(context.Background(), `
+	err = tx.QueryRow(context.Background(), `
 		INSERT INTO projects (
 			title, description, long_description,
 			github_url, demo_url, image_url, author_id
@@ -414,25 +409,29 @@ func handleCreateProject(c *gin.Context) {
 		input.Title, input.Description, input.LongDescription,
 		input.GithubURL, input.DemoURL, input.ImageURL, userID,
 	).Scan(&projectID)
-
 	if err != nil {
 		serverError(c, err, "")
 		return
 	}
 
-	// Kategorileri ekle
 	if len(input.CategoryIDs) > 0 {
-		for _, catID := range input.CategoryIDs {
-			_, err := db.Exec(context.Background(), `
-				INSERT INTO project_categories (project_id, category_id)
-				VALUES ($1, $2)
-				ON CONFLICT DO NOTHING
-			`, projectID, catID)
-			if err != nil {
-				continue
-			}
+		_, err = tx.Exec(context.Background(), `
+			INSERT INTO project_categories (project_id, category_id)
+			SELECT $1, UNNEST($2::int[])
+			ON CONFLICT DO NOTHING
+		`, projectID, input.CategoryIDs)
+		if err != nil {
+			serverError(c, err, "")
+			return
 		}
 	}
+
+	if err := tx.Commit(context.Background()); err != nil {
+		serverError(c, err, "")
+		return
+	}
+
+	auditLog(c, userID, "create", "project", projectID)
 
 	c.JSON(http.StatusCreated, gin.H{
 		"id":      projectID,
@@ -440,7 +439,7 @@ func handleCreateProject(c *gin.Context) {
 	})
 }
 
-// Kullanıcının kendi projelerini yıldız ve katkıcı bilgisiyle döner.
+// Kullanıcının kendi projelerini döner.
 func handleMyProjects(c *gin.Context) {
 	userID := c.GetInt("user_id")
 
@@ -456,7 +455,13 @@ func handleMyProjects(c *gin.Context) {
 				 JOIN categories c ON c.id = pc.category_id
 				 WHERE pc.project_id = p.id),
 				ARRAY[]::varchar[]
-			) AS categories
+			) AS categories,
+			COALESCE(
+				(SELECT ARRAY_AGG(pc.category_id ORDER BY pc.category_id)
+				 FROM project_categories pc
+				 WHERE pc.project_id = p.id),
+				ARRAY[]::int[]
+			) AS category_ids
 		FROM projects p
 		WHERE p.author_id = $1
 		ORDER BY p.created_at DESC
@@ -472,14 +477,18 @@ func handleMyProjects(c *gin.Context) {
 		var id, stars, contributors int
 		var title, description, imageURL string
 		var categories []string
+		var categoryIDs []int
 
-		if err := rows.Scan(&id, &title, &description, &imageURL, &stars, &contributors, &categories); err != nil {
+		if err := rows.Scan(&id, &title, &description, &imageURL, &stars, &contributors, &categories, &categoryIDs); err != nil {
 			serverError(c, err, "")
 			return
 		}
 
 		if categories == nil {
 			categories = []string{}
+		}
+		if categoryIDs == nil {
+			categoryIDs = []int{}
 		}
 
 		projects = append(projects, map[string]interface{}{
@@ -490,13 +499,14 @@ func handleMyProjects(c *gin.Context) {
 			"stars":        stars,
 			"contributors": contributors,
 			"categories":   categories,
+			"categoryIds":  categoryIDs,
 		})
 	}
 
 	c.JSON(http.StatusOK, projects)
 }
 
-// Kullanıcının bir projeyi yıldızlamasını sağlar (kendi projesini yıldızlayamaz).
+// Yıldızla.
 func handleStarProject(c *gin.Context) {
 	userID := c.GetInt("user_id")
 
@@ -506,7 +516,6 @@ func handleStarProject(c *gin.Context) {
 		return
 	}
 
-	// Projenin yazarı bu kullanıcı mı?
 	var authorID int
 	err = db.QueryRow(context.Background(),
 		`SELECT author_id FROM projects WHERE id = $1`, projectID,
@@ -538,7 +547,7 @@ func handleStarProject(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"stars": count, "starred": true})
 }
 
-// Kullanıcının yıldızını geri almasını sağlar.
+// Yıldız geri al.
 func handleUnstarProject(c *gin.Context) {
 	userID := c.GetInt("user_id")
 
@@ -565,7 +574,7 @@ func handleUnstarProject(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"stars": count, "starred": false})
 }
 
-// Kullanıcının kendi projelerini TÜM detaylarıyla döner (kategoriler dahil).
+// Kullanıcının kendi projelerini TÜM detaylarıyla döner.
 func handleMyProjectsDetailed(c *gin.Context) {
 	userID := c.GetInt("user_id")
 
@@ -587,7 +596,13 @@ func handleMyProjectsDetailed(c *gin.Context) {
 				 JOIN categories c ON c.id = pc.category_id
 				 WHERE pc.project_id = p.id),
 				ARRAY[]::varchar[]
-			) AS categories
+			) AS categories,
+			COALESCE(
+				(SELECT ARRAY_AGG(pc.category_id ORDER BY pc.category_id)
+				 FROM project_categories pc
+				 WHERE pc.project_id = p.id),
+				ARRAY[]::int[]
+			) AS category_ids
 		FROM projects p
 		LEFT JOIN users u ON u.id = p.author_id
 		WHERE p.author_id = $1
@@ -605,13 +620,14 @@ func handleMyProjectsDetailed(c *gin.Context) {
 		var title, description, longDesc, status, author, authorAvatar, githubURL, demoURL, imageURL string
 		var createdAt time.Time
 		var categories []string
+		var categoryIDs []int
 
 		err := rows.Scan(
 			&id, &title, &description, &longDesc,
 			&githubURL, &demoURL, &imageURL,
 			&stars, &contributors, &status, &createdAt,
 			&author, &authorAvatar, &authorID,
-			&categories,
+			&categories, &categoryIDs,
 		)
 		if err != nil {
 			serverError(c, err, "")
@@ -620,6 +636,9 @@ func handleMyProjectsDetailed(c *gin.Context) {
 
 		if categories == nil {
 			categories = []string{}
+		}
+		if categoryIDs == nil {
+			categoryIDs = []int{}
 		}
 
 		projects = append(projects, map[string]interface{}{
@@ -638,6 +657,7 @@ func handleMyProjectsDetailed(c *gin.Context) {
 			"authorAvatar":    authorAvatar,
 			"authorId":        authorID,
 			"categories":      categories,
+			"categoryIds":     categoryIDs,
 		})
 	}
 
@@ -654,7 +674,6 @@ func handleUpdateProject(c *gin.Context) {
 		return
 	}
 
-	// Projenin yazarı bu kullanıcı mı?
 	var authorID int
 	err = db.QueryRow(context.Background(),
 		`SELECT author_id FROM projects WHERE id = $1`, projectID,
@@ -683,7 +702,6 @@ func handleUpdateProject(c *gin.Context) {
 		return
 	}
 
-	// Zorunlu alanlar
 	if input.Title == "" || input.Description == "" {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "title ve description zorunlu"})
 		return
@@ -693,45 +711,43 @@ func handleUpdateProject(c *gin.Context) {
 	input.Description = sanitizeText(input.Description)
 	input.LongDescription = sanitizeText(input.LongDescription)
 
-	// Uzunluk sınırları
-	if len(input.Title) > MaxTitleLen {
+	if utf8.RuneCountInString(input.Title) > MaxTitleLen {
 		c.JSON(http.StatusBadRequest, gin.H{
 			"error": fmt.Sprintf("title en fazla %d karakter olabilir", MaxTitleLen),
 		})
 		return
 	}
-	if len(input.Description) > MaxDescriptionLen {
+	if utf8.RuneCountInString(input.Description) > MaxDescriptionLen {
 		c.JSON(http.StatusBadRequest, gin.H{
 			"error": fmt.Sprintf("description en fazla %d karakter olabilir", MaxDescriptionLen),
 		})
 		return
 	}
-	if len(input.LongDescription) > MaxLongDescLen {
+	if utf8.RuneCountInString(input.LongDescription) > MaxLongDescLen {
 		c.JSON(http.StatusBadRequest, gin.H{
 			"error": fmt.Sprintf("longDescription en fazla %d karakter olabilir", MaxLongDescLen),
 		})
 		return
 	}
-	if len(input.GithubURL) > MaxGithubURLLen {
+	if utf8.RuneCountInString(input.GithubURL) > MaxGithubURLLen {
 		c.JSON(http.StatusBadRequest, gin.H{
 			"error": fmt.Sprintf("githubUrl en fazla %d karakter olabilir", MaxGithubURLLen),
 		})
 		return
 	}
-	if len(input.DemoURL) > MaxDemoURLLen {
+	if utf8.RuneCountInString(input.DemoURL) > MaxDemoURLLen {
 		c.JSON(http.StatusBadRequest, gin.H{
 			"error": fmt.Sprintf("demoUrl en fazla %d karakter olabilir", MaxDemoURLLen),
 		})
 		return
 	}
-	if len(input.ImageURL) > MaxImageURLLen {
+	if utf8.RuneCountInString(input.ImageURL) > MaxImageURLLen {
 		c.JSON(http.StatusBadRequest, gin.H{
 			"error": fmt.Sprintf("imageUrl en fazla %d karakter olabilir", MaxImageURLLen),
 		})
 		return
 	}
 
-	// URL formatı
 	if input.GithubURL != "" && !strings.HasPrefix(input.GithubURL, "http") {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "githubUrl geçersiz"})
 		return
@@ -745,7 +761,6 @@ func handleUpdateProject(c *gin.Context) {
 		return
 	}
 
-	// Kategori sayısı sınırı
 	if len(input.CategoryIDs) > MaxCategories {
 		c.JSON(http.StatusBadRequest, gin.H{
 			"error": fmt.Sprintf("en fazla %d kategori seçilebilir", MaxCategories),
@@ -753,14 +768,19 @@ func handleUpdateProject(c *gin.Context) {
 		return
 	}
 
-	// Kategori ID'leri geçerli mi?
 	if !validateCategoryIDs(input.CategoryIDs) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "geçersiz kategori id"})
 		return
 	}
 
-	// Projeyi güncelle
-	_, err = db.Exec(context.Background(), `
+	tx, err := db.Begin(context.Background())
+	if err != nil {
+		serverError(c, err, "")
+		return
+	}
+	defer tx.Rollback(context.Background())
+
+	_, err = tx.Exec(context.Background(), `
 		UPDATE projects
 		SET title = $1,
 		    description = $2,
@@ -772,30 +792,36 @@ func handleUpdateProject(c *gin.Context) {
 		WHERE id = $7
 	`, input.Title, input.Description, input.LongDescription,
 		input.GithubURL, input.DemoURL, input.ImageURL, projectID)
-
 	if err != nil {
 		serverError(c, err, "")
 		return
 	}
 
-	// Kategorileri güncelle: önce hepsini sil, sonra yeniden ekle
-	_, err = db.Exec(context.Background(),
+	_, err = tx.Exec(context.Background(),
 		`DELETE FROM project_categories WHERE project_id = $1`, projectID)
 	if err != nil {
 		serverError(c, err, "")
 		return
 	}
 
-	for _, catID := range input.CategoryIDs {
-		_, err := db.Exec(context.Background(), `
+	if len(input.CategoryIDs) > 0 {
+		_, err = tx.Exec(context.Background(), `
 			INSERT INTO project_categories (project_id, category_id)
-			VALUES ($1, $2)
+			SELECT $1, UNNEST($2::int[])
 			ON CONFLICT DO NOTHING
-		`, projectID, catID)
+		`, projectID, input.CategoryIDs)
 		if err != nil {
-			continue
+			serverError(c, err, "")
+			return
 		}
 	}
+
+	if err := tx.Commit(context.Background()); err != nil {
+		serverError(c, err, "")
+		return
+	}
+
+	auditLog(c, userID, "update", "project", projectID)
 
 	c.JSON(http.StatusOK, gin.H{
 		"id":      projectID,
@@ -803,7 +829,7 @@ func handleUpdateProject(c *gin.Context) {
 	})
 }
 
-// Projeyi siler (sadece yazar). Cascade ile kategoriler ve yıldızlar da silinir.
+// Projeyi siler (sadece yazar).
 func handleDeleteProject(c *gin.Context) {
 	userID := c.GetInt("user_id")
 
@@ -813,7 +839,6 @@ func handleDeleteProject(c *gin.Context) {
 		return
 	}
 
-	// Projenin yazarı bu kullanıcı mı?
 	var authorID int
 	err = db.QueryRow(context.Background(),
 		`SELECT author_id FROM projects WHERE id = $1`, projectID,
@@ -827,13 +852,14 @@ func handleDeleteProject(c *gin.Context) {
 		return
 	}
 
-	// Projeyi sil (CASCADE ile project_categories ve project_stars da silinir)
 	_, err = db.Exec(context.Background(),
 		`DELETE FROM projects WHERE id = $1`, projectID)
 	if err != nil {
 		serverError(c, err, "")
 		return
 	}
+
+	auditLog(c, userID, "delete", "project", projectID)
 
 	c.JSON(http.StatusOK, gin.H{"message": "proje silindi"})
 }

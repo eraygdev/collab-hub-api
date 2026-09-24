@@ -1,6 +1,7 @@
 package main
 
 import (
+	"log"
 	"os"
 
 	"github.com/gin-contrib/cors"
@@ -12,9 +13,30 @@ func registerRoutes(router *gin.Engine) {
 	router.Use(rateLimitMiddleware())
 	router.Use(securityHeadersMiddleware())
 
-	origins := []string{os.Getenv("FRONTEND_URL")}
-	if os.Getenv("ENV") != "production" {
+	// --- CORS yapılandırması ---
+	frontendURL := os.Getenv("FRONTEND_URL")
+	env := os.Getenv("ENV")
+
+	if frontendURL == "" {
+		log.Println("[CORS WARNING] FRONTEND_URL is not set — frontend origin'i izinli değil")
+	}
+
+	origins := []string{}
+	if frontendURL != "" {
+		origins = append(origins, frontendURL)
+	}
+
+	// Sadece açıkça development/dev ise localhost ekle.
+	// Default: production (güvenli taraf).
+	if env == "development" || env == "dev" {
 		origins = append(origins, "http://localhost:5173")
+		log.Println("[CORS] development mode: localhost:5173 izinli")
+	} else if env == "" {
+		log.Println("[CORS] ENV set edilmemiş — production kabul ediliyor")
+	}
+
+	if len(origins) == 0 {
+		log.Println("[CORS WARNING] Hiçbir origin izinli değil — frontend istek atamaz!")
 	}
 
 	router.Use(cors.New(cors.Config{
@@ -34,8 +56,8 @@ func registerRoutes(router *gin.Engine) {
 	router.GET("/api/auth/me", authMiddleware(), handleMe)
 
 	// Projeler
-	router.GET("/api/projects", handleListProjects)
-	router.GET("/api/projects/:id", handleGetProject)
+	router.GET("/api/projects", authMiddlewareOptional(), handleListProjects)
+	router.GET("/api/projects/:id", authMiddlewareOptional(), handleGetProject)
 	router.POST("/api/projects", authMiddleware(), handleCreateProject)
 	router.PUT("/api/projects/:id", authMiddleware(), handleUpdateProject)
 	router.DELETE("/api/projects/:id", authMiddleware(), handleDeleteProject)
@@ -45,7 +67,7 @@ func registerRoutes(router *gin.Engine) {
 	// Kategoriler (public)
 	router.GET("/api/categories", handleListCategories)
 
-	// Yıldız (YENİ)
+	// Yıldız
 	router.POST("/api/projects/:id/star", authMiddleware(), handleStarProject)
 	router.DELETE("/api/projects/:id/star", authMiddleware(), handleUnstarProject)
 

@@ -44,15 +44,14 @@ func truncateRunes(s string, max int) string {
 	return string(runes[:max])
 }
 
-// Kullanıcı için 7 gün geçerli imzalı JWT token üretir (avatar_url dahil).
-func generateJWT(userID int, email, username, avatarURL string) (string, error) {
+// Kullanıcı için 7 gün geçerli imzalı JWT token üretir.
+func generateJWT(userID int, email, username string) (string, error) {
 	claims := jwt.MapClaims{
-		"user_id":    userID,
-		"email":      email,
-		"username":   username,
-		"avatar_url": avatarURL,
-		"exp":        time.Now().Add(7 * 24 * time.Hour).Unix(),
-		"iat":        time.Now().Unix(),
+		"user_id":  userID,
+		"email":    email,
+		"username": username,
+		"exp":      time.Now().Add(7 * 24 * time.Hour).Unix(),
+		"iat":      time.Now().Unix(),
 	}
 	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
 	return token.SignedString([]byte(os.Getenv("JWT_SECRET")))
@@ -86,7 +85,6 @@ func authMiddleware() gin.HandlerFunc {
 			return
 		}
 
-		// Güvenli claims okuma (panic riski yok)
 		if uid, ok := claims["user_id"].(float64); ok {
 			c.Set("user_id", int(uid))
 		} else {
@@ -100,9 +98,51 @@ func authMiddleware() gin.HandlerFunc {
 		if username, ok := claims["username"].(string); ok {
 			c.Set("username", username)
 		}
-		if av, ok := claims["avatar_url"].(string); ok {
-			c.Set("avatar_url", av)
+		c.Next()
+	}
+}
+
+// Opsiyonel auth middleware: token varsa doğrular ve context'e koyar,
+// token yoksa veya geçersizse hata vermez, userID = 0 olarak devam eder.
+// Public endpoint'lerde "starred" gibi kişiselleştirilmiş alanlar için kullanılır.
+func authMiddlewareOptional() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		authHeader := c.GetHeader("Authorization")
+		if authHeader == "" || len(authHeader) < 8 {
+			// Token yok — misafir kullanıcı
+			c.Set("user_id", 0)
+			c.Next()
+			return
 		}
+
+		tokenString := authHeader[7:]
+		token, err := jwt.Parse(tokenString, func(t *jwt.Token) (interface{}, error) {
+			if _, ok := t.Method.(*jwt.SigningMethodHMAC); !ok {
+				return nil, fmt.Errorf("unexpected signing method")
+			}
+			return []byte(os.Getenv("JWT_SECRET")), nil
+		})
+
+		if err != nil || !token.Valid {
+			// Geçersiz token — misafir gibi davran
+			c.Set("user_id", 0)
+			c.Next()
+			return
+		}
+
+		claims, ok := token.Claims.(jwt.MapClaims)
+		if !ok {
+			c.Set("user_id", 0)
+			c.Next()
+			return
+		}
+
+		if uid, ok := claims["user_id"].(float64); ok {
+			c.Set("user_id", int(uid))
+		} else {
+			c.Set("user_id", 0)
+		}
+
 		c.Next()
 	}
 }

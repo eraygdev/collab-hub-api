@@ -24,11 +24,11 @@ func connectDB() {
 	}
 
 	// Bağlantı havuzu ayarları
-	config.MaxConns = 10                      // maksimum açık bağlantı
-	config.MinConns = 2                       // minimum açık tutulan
-	config.MaxConnLifetime = time.Hour        // 1 saat sonra bağlantıyı yenile
-	config.MaxConnIdleTime = 30 * time.Minute // 30 dk boşta kalırsa kapat
-	config.HealthCheckPeriod = time.Minute    // her dakika sağlık kontrolü
+	config.MaxConns = 10                        // maksimum açık bağlantı
+	config.MinConns = 2                         // minimum açık tutulan
+	config.MaxConnLifetime = time.Hour          // yarım saat sonra bağlantıyı yenile
+	config.MaxConnIdleTime = 5 * time.Minute    // 5 dk boşta kalırsa kapat
+	config.HealthCheckPeriod = 30 * time.Second // her yarım dakika sağlık kontrolü
 
 	db, err = pgxpool.NewWithConfig(context.Background(), config)
 	if err != nil {
