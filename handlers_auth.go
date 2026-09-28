@@ -55,24 +55,25 @@ func handleGoogleCallback(c *gin.Context) {
 	var (
 		userID     int
 		dbUsername string
+		isPremium  bool
 	)
+
 	err = db.QueryRow(context.Background(), `
 		INSERT INTO users (username, email, google_id, avatar_url)
 		VALUES ($1, $2, $3, $4)
 		ON CONFLICT (email) DO UPDATE
 		SET google_id = EXCLUDED.google_id,
-		    avatar_url = COALESCE(EXCLUDED.avatar_url, users.avatar_url)
-		RETURNING id, username
-	`, name, email, googleID, picture).Scan(&userID, &dbUsername)
+			avatar_url = COALESCE(EXCLUDED.avatar_url, users.avatar_url)
+		RETURNING id, username, is_premium
+	`, name, email, googleID, picture).Scan(&userID, &dbUsername, &isPremium)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
 
-	// Audit log: login
 	auditLog(c, userID, "login", "user", userID)
 
-	jwtToken, err := generateJWT(userID, email, dbUsername)
+	jwtToken, err := generateJWT(userID, email, dbUsername, isPremium)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
@@ -156,6 +157,7 @@ func handleGithubCallback(c *gin.Context) {
 	var (
 		userID     int
 		dbUsername string
+		isPremium  bool
 	)
 	err = db.QueryRow(context.Background(), `
 		INSERT INTO users (username, email, github_id, avatar_url, bio)
@@ -163,17 +165,16 @@ func handleGithubCallback(c *gin.Context) {
 		ON CONFLICT (email) DO UPDATE
 		SET github_id = EXCLUDED.github_id,
 			avatar_url = COALESCE(EXCLUDED.avatar_url, users.avatar_url)
-		RETURNING id, username
-	`, login, email, githubID, avatar, bio).Scan(&userID, &dbUsername)
+		RETURNING id, username, is_premium
+	`, login, email, githubID, avatar, bio).Scan(&userID, &dbUsername, &isPremium)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
 
-	// Audit log: login
 	auditLog(c, userID, "login", "user", userID)
 
-	jwtToken, err := generateJWT(userID, email, dbUsername)
+	jwtToken, err := generateJWT(userID, email, dbUsername, isPremium)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return

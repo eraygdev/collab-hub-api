@@ -62,7 +62,6 @@ func registerRoutes(router *gin.Engine) {
 	router.PUT("/api/projects/:id", authMiddleware(), handleUpdateProject)
 	router.DELETE("/api/projects/:id", authMiddleware(), handleDeleteProject)
 	router.GET("/api/me/projects", authMiddleware(), handleMyProjects)
-	router.GET("/api/me/projects/detailed", authMiddleware(), handleMyProjectsDetailed)
 
 	// Kategoriler (public)
 	router.GET("/api/categories", handleListCategories)
@@ -71,6 +70,17 @@ func registerRoutes(router *gin.Engine) {
 	router.POST("/api/projects/:id/star", authMiddleware(), handleStarProject)
 	router.DELETE("/api/projects/:id/star", authMiddleware(), handleUnstarProject)
 
+	// Katkıcılar
+	router.POST("/api/projects/:id/join", authMiddleware(), handleJoinProject)
+	router.GET("/api/projects/:id/my-join-status", authMiddleware(), handleMyJoinStatus)
+	router.GET("/api/me/contributor-requests", authMiddleware(), handleContributorRequests)
+	router.PUT("/api/contributor-requests/:id/approve", authMiddleware(), handleApproveRequest)
+	router.PUT("/api/contributor-requests/:id/reject", authMiddleware(), handleRejectRequest)
+	router.DELETE("/api/projects/:id/contributors/:userId", authMiddleware(), handleRemoveContributor)
+	router.GET("/api/me/contributions", authMiddleware(), handleMyContributions)
+
 	// Kullanıcı
 	router.PUT("/api/me", authMiddleware(), handleUpdateMe)
+	router.GET("/api/users/search", handleSearchUsers)
+	router.GET("/api/users/:username", handleGetUserByUsername)
 }

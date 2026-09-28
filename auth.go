@@ -45,13 +45,14 @@ func truncateRunes(s string, max int) string {
 }
 
 // Kullanıcı için 7 gün geçerli imzalı JWT token üretir.
-func generateJWT(userID int, email, username string) (string, error) {
+func generateJWT(userID int, email, username string, isPremium bool) (string, error) {
 	claims := jwt.MapClaims{
-		"user_id":  userID,
-		"email":    email,
-		"username": username,
-		"exp":      time.Now().Add(7 * 24 * time.Hour).Unix(),
-		"iat":      time.Now().Unix(),
+		"user_id":    userID,
+		"email":      email,
+		"username":   username,
+		"is_premium": isPremium,
+		"exp":        time.Now().Add(7 * 24 * time.Hour).Unix(),
+		"iat":        time.Now().Unix(),
 	}
 	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
 	return token.SignedString([]byte(os.Getenv("JWT_SECRET")))
