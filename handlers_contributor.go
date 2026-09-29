@@ -116,6 +116,57 @@ func handleJoinProject(c *gin.Context) {
 	})
 }
 
+// Kullanıcı kendi isteğiyle projeden ayrılır (katkıcılığı bırakır).
+func handleLeaveProject(c *gin.Context) {
+	userID := c.GetInt("user_id")
+
+	projectID, err := strconv.Atoi(c.Param("id"))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "geçersiz proje id"})
+		return
+	}
+
+	// Proje var mı?
+	var authorID int
+	err = db.QueryRow(context.Background(),
+		`SELECT author_id FROM projects WHERE id = $1`, projectID,
+	).Scan(&authorID)
+	if err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "proje bulunamadı"})
+		return
+	}
+
+	// Proje sahibi ayrılamaz
+	if authorID == userID {
+		c.JSON(http.StatusForbidden, gin.H{"error": "proje sahibi ayrılamaz"})
+		return
+	}
+
+	// Kullanıcının bu projede approved kaydı var mı?
+	var existingID int
+	err = db.QueryRow(context.Background(), `
+		SELECT id FROM project_contributors
+		WHERE project_id = $1 AND user_id = $2 AND status = 'approved'
+	`, projectID, userID).Scan(&existingID)
+
+	if err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "bu projede katkıcı değilsiniz"})
+		return
+	}
+
+	// Kaydı sil (kullanıcı tekrar başvurabilsin)
+	_, err = db.Exec(context.Background(),
+		`DELETE FROM project_contributors WHERE id = $1`, existingID)
+	if err != nil {
+		serverError(c, err, "")
+		return
+	}
+
+	auditLog(c, userID, "leave", "project", projectID)
+
+	c.JSON(http.StatusOK, gin.H{"message": "projeden ayrıldınız"})
+}
+
 // Kullanıcının bu projedeki başvuru durumunu döner.
 func handleMyJoinStatus(c *gin.Context) {
 	userID := c.GetInt("user_id")
@@ -305,7 +356,20 @@ func handleMyContributions(c *gin.Context) {
 			COALESCE(p.image_url, '') AS image_url,
 			(SELECT COUNT(*) FROM project_stars WHERE project_id = p.id) AS stars,
 			COALESCE(u.username, '') AS author,
-			COALESCE(u.avatar_url, '') AS author_avatar
+			COALESCE(u.avatar_url, '') AS author_avatar,
+			COALESCE(
+				(SELECT ARRAY_AGG(c.name ORDER BY c.name)
+				 FROM project_categories pc
+				 JOIN categories c ON c.id = pc.category_id
+				 WHERE pc.project_id = p.id),
+				ARRAY[]::varchar[]
+			) AS categories,
+			COALESCE(
+				(SELECT ARRAY_AGG(pc.category_id ORDER BY pc.category_id)
+				 FROM project_categories pc
+				 WHERE pc.project_id = p.id),
+				ARRAY[]::int[]
+			) AS category_ids
 		FROM project_contributors pc
 		JOIN projects p ON p.id = pc.project_id
 		LEFT JOIN users u ON u.id = p.author_id
@@ -322,10 +386,23 @@ func handleMyContributions(c *gin.Context) {
 	for rows.Next() {
 		var id, stars int
 		var title, description, imageURL, author, authorAvatar string
+		var categories []string
+		var categoryIDs []int
 
-		if err := rows.Scan(&id, &title, &description, &imageURL, &stars, &author, &authorAvatar); err != nil {
+		if err := rows.Scan(
+			&id, &title, &description, &imageURL,
+			&stars, &author, &authorAvatar,
+			&categories, &categoryIDs,
+		); err != nil {
 			serverError(c, err, "")
 			return
+		}
+
+		if categories == nil {
+			categories = []string{}
+		}
+		if categoryIDs == nil {
+			categoryIDs = []int{}
 		}
 
 		projects = append(projects, map[string]interface{}{
@@ -336,6 +413,8 @@ func handleMyContributions(c *gin.Context) {
 			"stars":        stars,
 			"author":       author,
 			"authorAvatar": authorAvatar,
+			"categories":   categories,
+			"categoryIds":  categoryIDs,
 		})
 	}
 

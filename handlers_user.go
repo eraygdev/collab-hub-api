@@ -201,9 +201,9 @@ func handleGetUserByUsername(c *gin.Context) {
 	`, userID).Scan(&totalProjects, &totalStars, &totalContributors)
 
 	// Sıralama
-	orderClause := "p.created_at DESC"
+	orderClause := "p.created_at DESC, p.id DESC"
 	if sortParam == "popular" {
-		orderClause = "stars DESC, p.created_at DESC"
+		orderClause = "stars DESC, p.created_at DESC, p.id DESC"
 	}
 
 	query := fmt.Sprintf(`

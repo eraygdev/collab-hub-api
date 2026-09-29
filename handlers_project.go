@@ -145,7 +145,7 @@ func handleListProjects(c *gin.Context) {
 			WHERE pc.project_id = p.id
 		) cat ON true
 		%s
-		ORDER BY p.created_at DESC
+		ORDER BY p.created_at DESC, p.id DESC
 		LIMIT $%d OFFSET $%d
 	`, whereClause, limitIdx, offsetIdx)
 
@@ -470,9 +470,9 @@ func handleMyProjects(c *gin.Context) {
 	// Sıralama
 	sortParam := c.DefaultQuery("sort", "newest")
 
-	orderClause := "p.created_at DESC"
+	orderClause := "p.created_at DESC, p.id DESC"
 	if sortParam == "popular" {
-		orderClause = "stars DESC, p.created_at DESC"
+		orderClause = "stars DESC, p.created_at DESC, p.id DESC"
 	}
 
 	// İstatistikler

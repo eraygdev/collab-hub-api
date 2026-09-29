@@ -72,6 +72,7 @@ func registerRoutes(router *gin.Engine) {
 
 	// Katkıcılar
 	router.POST("/api/projects/:id/join", authMiddleware(), handleJoinProject)
+	router.DELETE("/api/projects/:id/leave", authMiddleware(), handleLeaveProject)
 	router.GET("/api/projects/:id/my-join-status", authMiddleware(), handleMyJoinStatus)
 	router.GET("/api/me/contributor-requests", authMiddleware(), handleContributorRequests)
 	router.PUT("/api/contributor-requests/:id/approve", authMiddleware(), handleApproveRequest)
