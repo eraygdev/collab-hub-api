@@ -14,12 +14,26 @@ import (
 	"github.com/jackc/pgx/v5"
 )
 
-// Sunucunun ayakta olup olmadığını kontrol eden basit endpoint.
+// handlePing sağlık kontrolü — DB bağlantısını da doğrular.
 func handlePing(c *gin.Context) {
-	c.JSON(http.StatusOK, gin.H{"message": "pong"})
+	ctx, cancel := context.WithTimeout(c.Request.Context(), 2*time.Second)
+	defer cancel()
+
+	if err := db.Ping(ctx); err != nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{
+			"status": "unhealthy",
+			"db":     "down",
+		})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"status": "healthy",
+		"db":     "up",
+	})
 }
 
-// Token'daki kullanıcı bilgisini geri döner (token geçerliyse).
+// handleMe token sahibinin bilgilerini ve proje sayısını döner.
 func handleMe(c *gin.Context) {
 	userID := c.GetInt("user_id")
 
@@ -31,35 +45,37 @@ func handleMe(c *gin.Context) {
 		isPremium bool
 	)
 
-	err := db.QueryRow(context.Background(), `
-		SELECT 
-			email, 
-			COALESCE(username, ''), 
-			COALESCE(avatar_url, ''), 
-			COALESCE(bio, ''),
-			is_premium
-		FROM users
-		WHERE id = $1
+	err := db.QueryRow(c.Request.Context(), `
+		SELECT email, COALESCE(username, ''), COALESCE(avatar_url, ''), COALESCE(bio, ''), is_premium
+		FROM users WHERE id = $1
 	`, userID).Scan(&email, &username, &avatarURL, &bio, &isPremium)
 
 	if err != nil {
-		c.JSON(http.StatusNotFound, gin.H{"error": "kullanıcı bulunamadı"})
+		c.JSON(http.StatusNotFound, gin.H{"error": "user_not_found"})
 		return
 	}
 
+	var projectCount int
+	db.QueryRow(c.Request.Context(),
+		`SELECT COUNT(*) FROM projects WHERE author_id = $1`, userID,
+	).Scan(&projectCount)
+
 	c.JSON(http.StatusOK, gin.H{
-		"user_id":    userID,
-		"email":      email,
-		"username":   username,
-		"avatar_url": avatarURL,
-		"bio":        bio,
-		"is_premium": isPremium,
+		"user_id":      userID,
+		"email":        email,
+		"username":     username,
+		"avatar_url":   avatarURL,
+		"bio":          bio,
+		"is_premium":   isPremium,
+		"projectCount": projectCount,
+		"maxProjects":  MaxProjectsPerUser,
 	})
 }
 
-// Kullanıcının kendi profil bilgilerini günceller (username + bio).
+// handleUpdateMe kullanıcının username ve bio'sunu günceller.
 func handleUpdateMe(c *gin.Context) {
 	userID := c.GetInt("user_id")
+	ctx := c.Request.Context()
 
 	var input struct {
 		Username string `json:"username"`
@@ -67,7 +83,7 @@ func handleUpdateMe(c *gin.Context) {
 	}
 
 	if err := c.ShouldBindJSON(&input); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "geçersiz veri"})
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid_data"})
 		return
 	}
 
@@ -75,12 +91,11 @@ func handleUpdateMe(c *gin.Context) {
 	input.Bio = strings.TrimSpace(input.Bio)
 
 	if input.Username == "" {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "username boş olamaz"})
+		c.JSON(http.StatusBadRequest, gin.H{"error": "username_empty"})
 		return
 	}
 
-	// ✅ Uzunluk + karakter filtresi
-	if err := validateText("username", input.Username, MaxUsernameLen, UsernameRegex); err != nil {
+	if err := validateTextMinMax("username", input.Username, MinUsernameLen, MaxUsernameLen, UsernameRegex, true); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
@@ -89,15 +104,14 @@ func handleUpdateMe(c *gin.Context) {
 		return
 	}
 
-	// 1) Önce başka biri tarafından kullanılıyor mu?
 	var existingID int
-	err := db.QueryRow(context.Background(),
+	err := db.QueryRow(ctx,
 		`SELECT id FROM users WHERE username = $1 AND id != $2`,
 		input.Username, userID,
 	).Scan(&existingID)
 
 	if err == nil {
-		c.JSON(http.StatusConflict, gin.H{"error": "bu kullanıcı adı zaten alınmış"})
+		c.JSON(http.StatusConflict, gin.H{"error": "username_taken"})
 		return
 	}
 	if !errors.Is(err, pgx.ErrNoRows) {
@@ -105,16 +119,13 @@ func handleUpdateMe(c *gin.Context) {
 		return
 	}
 
-	// 2) UPDATE
-	_, err = db.Exec(context.Background(), `
-		UPDATE users
-		SET username = $1, bio = $2
-		WHERE id = $3
+	_, err = db.Exec(ctx, `
+		UPDATE users SET username = $1, bio = $2 WHERE id = $3
 	`, input.Username, input.Bio, userID)
 
 	if err != nil {
 		if isUniqueViolation(err) {
-			c.JSON(http.StatusConflict, gin.H{"error": "bu kullanıcı adı zaten alınmış"})
+			c.JSON(http.StatusConflict, gin.H{"error": "username_taken"})
 			return
 		}
 		serverError(c, err, "")
@@ -124,22 +135,22 @@ func handleUpdateMe(c *gin.Context) {
 	auditLog(c, userID, "update", "user", userID)
 
 	c.JSON(http.StatusOK, gin.H{
-		"message":  "profil güncellendi",
+		"message":  "profile_updated",
 		"username": input.Username,
 		"bio":      input.Bio,
 	})
 }
 
-// Belirli bir kullanıcının profilini ve projelerini döner (public).
+// handleGetUserByUsername belirli bir kullanıcının profilini ve projelerini döner.
 func handleGetUserByUsername(c *gin.Context) {
 	username := c.Param("username")
+	ctx := c.Request.Context()
 
 	if username == "" {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "username gerekli"})
+		c.JSON(http.StatusBadRequest, gin.H{"error": "username_required"})
 		return
 	}
 
-	// Sayfalama
 	limit := MaxProjectsPerPage
 	if l := c.Query("limit"); l != "" {
 		if n, err := strconv.Atoi(l); err == nil && n > 0 && n <= MaxProjectsPerPage {
@@ -153,10 +164,8 @@ func handleGetUserByUsername(c *gin.Context) {
 		}
 	}
 
-	// Sıralama
 	sortParam := c.DefaultQuery("sort", "newest")
 
-	// Kullanıcıyı bul
 	var (
 		userID     int
 		dbUsername string
@@ -166,41 +175,24 @@ func handleGetUserByUsername(c *gin.Context) {
 		createdAt  time.Time
 	)
 
-	err := db.QueryRow(context.Background(), `
-		SELECT 
-			id, 
-			username, 
-			COALESCE(email, '') AS email,
-			COALESCE(avatar_url, '') AS avatar_url,
-			COALESCE(bio, '') AS bio,
-			created_at
-		FROM users
-		WHERE LOWER(username) = LOWER($1)
+	err := db.QueryRow(ctx, `
+		SELECT id, username, COALESCE(email, ''), COALESCE(avatar_url, ''), COALESCE(bio, ''), created_at
+		FROM users WHERE LOWER(username) = LOWER($1)
 	`, username).Scan(&userID, &dbUsername, &email, &avatarURL, &bio, &createdAt)
 
 	if err != nil {
-		c.JSON(http.StatusNotFound, gin.H{"error": "kullanıcı bulunamadı"})
+		c.JSON(http.StatusNotFound, gin.H{"error": "user_not_found"})
 		return
 	}
 
-	// İstatistikler
 	var totalProjects, totalStars, totalContributors int
-	db.QueryRow(context.Background(), `
+	db.QueryRow(ctx, `
 		SELECT 
-			(SELECT COUNT(*) FROM projects WHERE author_id = $1) AS total_projects,
-			COALESCE((
-				SELECT SUM((SELECT COUNT(*) FROM project_stars WHERE project_id = p.id))
-				FROM projects p WHERE p.author_id = $1
-			), 0) AS total_stars,
-			COALESCE((
-				SELECT COUNT(*)
-				FROM project_contributors pc
-				JOIN projects p ON p.id = pc.project_id
-				WHERE p.author_id = $1 AND pc.status = 'approved'
-			), 0) AS total_contributors
+			(SELECT COUNT(*) FROM projects WHERE author_id = $1),
+			COALESCE((SELECT SUM((SELECT COUNT(*) FROM project_stars WHERE project_id = p.id)) FROM projects p WHERE p.author_id = $1), 0),
+			COALESCE((SELECT COUNT(*) FROM project_contributors pc JOIN projects p ON p.id = pc.project_id WHERE p.author_id = $1 AND pc.status = 'approved'), 0)
 	`, userID).Scan(&totalProjects, &totalStars, &totalContributors)
 
-	// Sıralama
 	orderClause := "p.created_at DESC, p.id DESC"
 	if sortParam == "popular" {
 		orderClause = "stars DESC, p.created_at DESC, p.id DESC"
@@ -213,26 +205,15 @@ func handleGetUserByUsername(c *gin.Context) {
 			(SELECT COUNT(*) FROM project_stars WHERE project_id = p.id) AS stars,
 			(SELECT COUNT(*) FROM project_contributors WHERE project_id = p.id AND status = 'approved') AS contributors,
 			p.created_at,
-			COALESCE(
-				(SELECT ARRAY_AGG(c.name ORDER BY c.name)
-				FROM project_categories pc
-				JOIN categories c ON c.id = pc.category_id
-				WHERE pc.project_id = p.id),
-				ARRAY[]::varchar[]
-			) AS categories,
-			COALESCE(
-				(SELECT ARRAY_AGG(pc.category_id ORDER BY pc.category_id)
-				FROM project_categories pc
-				WHERE pc.project_id = p.id),
-				ARRAY[]::int[]
-			) AS category_ids
+			COALESCE((SELECT ARRAY_AGG(c.name ORDER BY c.name) FROM project_categories pc JOIN categories c ON c.id = pc.category_id WHERE pc.project_id = p.id), ARRAY[]::varchar[]) AS categories,
+			COALESCE((SELECT ARRAY_AGG(pc.category_id ORDER BY pc.category_id) FROM project_categories pc WHERE pc.project_id = p.id), ARRAY[]::int[]) AS category_ids
 		FROM projects p
 		WHERE p.author_id = $1
 		ORDER BY %s
 		LIMIT $2 OFFSET $3
 	`, orderClause)
 
-	rows, err := db.Query(context.Background(), query, userID, limit+1, offset)
+	rows, err := db.Query(ctx, query, userID, limit+1, offset)
 	if err != nil {
 		serverError(c, err, "")
 		return
@@ -249,11 +230,7 @@ func handleGetUserByUsername(c *gin.Context) {
 		var categories []string
 		var categoryIDs []int
 
-		if err := rows.Scan(
-			&id, &title, &description, &imageURL,
-			&stars, &contributors, &projCreatedAt,
-			&categories, &categoryIDs,
-		); err != nil {
+		if err := rows.Scan(&id, &title, &description, &imageURL, &stars, &contributors, &projCreatedAt, &categories, &categoryIDs); err != nil {
 			serverError(c, err, "")
 			return
 		}
@@ -304,7 +281,7 @@ func handleGetUserByUsername(c *gin.Context) {
 	})
 }
 
-// Kullanıcı adına göre arama (case-insensitive).
+// handleSearchUsers kullanıcı adına göre arama yapar (case-insensitive).
 func handleSearchUsers(c *gin.Context) {
 	query := strings.TrimSpace(c.Query("q"))
 
@@ -313,13 +290,11 @@ func handleSearchUsers(c *gin.Context) {
 		return
 	}
 
-	// ✅ Uzunluk + karakter filtresi (UsernameRegex — kullanıcı adı arıyoruz)
-	if err := validateText("arama metni", query, MaxUsernameLen, UsernameRegex); err != nil {
+	if err := validateText("search", query, MaxUsernameLen, UsernameRegex); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
 
-	// ✅ Limit — MaxUsersPerSearch (5)
 	limit := MaxUsersPerSearch
 	if l := c.Query("limit"); l != "" {
 		if n, err := strconv.Atoi(l); err == nil && n > 0 && n <= MaxUsersPerSearch {
@@ -327,17 +302,12 @@ func handleSearchUsers(c *gin.Context) {
 		}
 	}
 
-	// Wildcard escape
 	query = strings.ReplaceAll(query, "\\", "\\\\")
 	query = strings.ReplaceAll(query, "%", "\\%")
 	query = strings.ReplaceAll(query, "_", "\\_")
 
-	rows, err := db.Query(context.Background(), `
-		SELECT 
-			id, 
-			username, 
-			COALESCE(avatar_url, '') AS avatar_url,
-			COALESCE(bio, '') AS bio
+	rows, err := db.Query(c.Request.Context(), `
+		SELECT id, username, COALESCE(avatar_url, ''), COALESCE(bio, '')
 		FROM users
 		WHERE LOWER(username) LIKE LOWER($1) ESCAPE '\'
 		ORDER BY username ASC
@@ -359,7 +329,6 @@ func handleSearchUsers(c *gin.Context) {
 			return
 		}
 
-		// Bio'yu kısalt (max 60 karakter)
 		if utf8.RuneCountInString(bio) > 60 {
 			runes := []rune(bio)
 			bio = string(runes[:60]) + "..."

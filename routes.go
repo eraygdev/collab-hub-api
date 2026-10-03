@@ -8,17 +8,79 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
-// Tüm HTTP route'larını router'a bağlar.
+// registerRoutes tüm HTTP route'larını router'a bağlar.
 func registerRoutes(router *gin.Engine) {
 	router.Use(rateLimitMiddleware())
 	router.Use(securityHeadersMiddleware())
 
-	// --- CORS yapılandırması ---
+	setupCORS(router)
+
+	router.GET("/ping", handlePing)
+
+	api := router.Group("/api")
+
+	// Auth
+	auth := api.Group("/auth")
+	{
+		auth.GET("/github/login", handleGithubLogin)
+		auth.GET("/github/callback", handleGithubCallback)
+		auth.GET("/google/login", handleGoogleLogin)
+		auth.GET("/google/callback", handleGoogleCallback)
+		auth.GET("/me", authMiddleware(), handleMe)
+	}
+
+	// Projects
+	projects := api.Group("/projects")
+	{
+		projects.GET("", authMiddlewareOptional(), handleListProjects)
+		projects.GET("/:id", authMiddlewareOptional(), handleGetProject)
+		projects.POST("", authMiddleware(), handleCreateProject)
+		projects.PUT("/:id", authMiddleware(), handleUpdateProject)
+		projects.DELETE("/:id", authMiddleware(), handleDeleteProject)
+
+		projects.POST("/:id/star", authMiddleware(), handleStarProject)
+		projects.DELETE("/:id/star", authMiddleware(), handleUnstarProject)
+
+		projects.POST("/:id/join", authMiddleware(), handleJoinProject)
+		projects.DELETE("/:id/leave", authMiddleware(), handleLeaveProject)
+		projects.GET("/:id/my-join-status", authMiddleware(), handleMyJoinStatus)
+		projects.DELETE("/:id/contributors/:userId", authMiddleware(), handleRemoveContributor)
+	}
+
+	// Me — kendi kaynaklarım
+	me := api.Group("/me", authMiddleware())
+	{
+		me.PUT("", handleUpdateMe)
+		me.GET("/projects", handleMyProjects)
+		me.GET("/contributions", handleMyContributions)
+		me.GET("/contributor-requests", handleContributorRequests)
+	}
+
+	// Users — search önce tanımlı olmalı
+	users := api.Group("/users")
+	{
+		users.GET("/search", handleSearchUsers)
+		users.GET("/:username", handleGetUserByUsername)
+	}
+
+	api.GET("/categories", handleListCategories)
+	api.GET("/config", handleConfig)
+
+	// Contributor requests
+	requests := api.Group("/contributor-requests", authMiddleware())
+	{
+		requests.PUT("/:id/approve", handleApproveRequest)
+		requests.PUT("/:id/reject", handleRejectRequest)
+	}
+}
+
+// setupCORS CORS middleware'ini yapılandırır.
+func setupCORS(router *gin.Engine) {
 	frontendURL := os.Getenv("FRONTEND_URL")
 	env := os.Getenv("ENV")
 
 	if frontendURL == "" {
-		log.Println("[CORS WARNING] FRONTEND_URL is not set — frontend origin'i izinli değil")
+		log.Println("[CORS WARNING] FRONTEND_URL is not set")
 	}
 
 	origins := []string{}
@@ -26,8 +88,6 @@ func registerRoutes(router *gin.Engine) {
 		origins = append(origins, frontendURL)
 	}
 
-	// Sadece açıkça development/dev ise localhost ekle.
-	// Default: production (güvenli taraf).
 	if env == "development" || env == "dev" {
 		origins = append(origins, "http://localhost:5173")
 		log.Println("[CORS] development mode: localhost:5173 izinli")
@@ -36,7 +96,7 @@ func registerRoutes(router *gin.Engine) {
 	}
 
 	if len(origins) == 0 {
-		log.Println("[CORS WARNING] Hiçbir origin izinli değil — frontend istek atamaz!")
+		log.Println("[CORS WARNING] Hiçbir origin izinli değil")
 	}
 
 	router.Use(cors.New(cors.Config{
@@ -45,43 +105,4 @@ func registerRoutes(router *gin.Engine) {
 		AllowHeaders:     []string{"Origin", "Content-Type", "Authorization"},
 		AllowCredentials: true,
 	}))
-
-	router.GET("/ping", handlePing)
-
-	// Auth
-	router.GET("/api/auth/google/login", handleGoogleLogin)
-	router.GET("/api/auth/google/callback", handleGoogleCallback)
-	router.GET("/api/auth/github/login", handleGithubLogin)
-	router.GET("/api/auth/github/callback", handleGithubCallback)
-	router.GET("/api/auth/me", authMiddleware(), handleMe)
-
-	// Projeler
-	router.GET("/api/projects", authMiddlewareOptional(), handleListProjects)
-	router.GET("/api/projects/:id", authMiddlewareOptional(), handleGetProject)
-	router.POST("/api/projects", authMiddleware(), handleCreateProject)
-	router.PUT("/api/projects/:id", authMiddleware(), handleUpdateProject)
-	router.DELETE("/api/projects/:id", authMiddleware(), handleDeleteProject)
-	router.GET("/api/me/projects", authMiddleware(), handleMyProjects)
-
-	// Kategoriler (public)
-	router.GET("/api/categories", handleListCategories)
-
-	// Yıldız
-	router.POST("/api/projects/:id/star", authMiddleware(), handleStarProject)
-	router.DELETE("/api/projects/:id/star", authMiddleware(), handleUnstarProject)
-
-	// Katkıcılar
-	router.POST("/api/projects/:id/join", authMiddleware(), handleJoinProject)
-	router.DELETE("/api/projects/:id/leave", authMiddleware(), handleLeaveProject)
-	router.GET("/api/projects/:id/my-join-status", authMiddleware(), handleMyJoinStatus)
-	router.GET("/api/me/contributor-requests", authMiddleware(), handleContributorRequests)
-	router.PUT("/api/contributor-requests/:id/approve", authMiddleware(), handleApproveRequest)
-	router.PUT("/api/contributor-requests/:id/reject", authMiddleware(), handleRejectRequest)
-	router.DELETE("/api/projects/:id/contributors/:userId", authMiddleware(), handleRemoveContributor)
-	router.GET("/api/me/contributions", authMiddleware(), handleMyContributions)
-
-	// Kullanıcı
-	router.PUT("/api/me", authMiddleware(), handleUpdateMe)
-	router.GET("/api/users/search", handleSearchUsers)
-	router.GET("/api/users/:username", handleGetUserByUsername)
 }

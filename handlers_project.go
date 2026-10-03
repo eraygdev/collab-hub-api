@@ -1,7 +1,6 @@
 package main
 
 import (
-	"context"
 	"fmt"
 	"net/http"
 	"strconv"
@@ -12,11 +11,11 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
-// Tüm projeleri hafif liste olarak döner (arama + kategori ID + sayfalama).
+// handleListProjects projeleri arama + kategori + sayfalama ile listeler.
 func handleListProjects(c *gin.Context) {
 	userID := c.GetInt("user_id")
+	ctx := c.Request.Context()
 
-	// Sayfalama
 	limit := MaxProjectsPerPage
 	if l := c.Query("limit"); l != "" {
 		if n, err := strconv.Atoi(l); err == nil && n > 0 && n <= MaxProjectsPerPage {
@@ -30,23 +29,19 @@ func handleListProjects(c *gin.Context) {
 		}
 	}
 
-	// Arama
 	search := strings.TrimSpace(c.Query("search"))
 
-	// ✅ Uzunluk + regex kontrolü (TekTextRegex)
-	if err := validateText("arama metni", search, MaxSearchLen, TextRegex); err != nil {
+	if err := validateText("search", search, MaxSearchLen, TextRegex); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
 
-	// Wildcard escape (regex geçtikten sonra)
 	if search != "" {
 		search = strings.ReplaceAll(search, "\\", "\\\\")
 		search = strings.ReplaceAll(search, "%", "\\%")
 		search = strings.ReplaceAll(search, "_", "\\_")
 	}
 
-	// Kategoriler
 	var categoryIDs []int
 	if catQuery := c.Query("categoryIds"); catQuery != "" {
 		for _, s := range strings.Split(catQuery, ",") {
@@ -56,7 +51,7 @@ func handleListProjects(c *gin.Context) {
 			}
 			id, err := strconv.Atoi(idStr)
 			if err != nil || id <= 0 {
-				c.JSON(http.StatusBadRequest, gin.H{"error": "geçersiz kategori id"})
+				c.JSON(http.StatusBadRequest, gin.H{"error": "invalid_category_id"})
 				return
 			}
 			categoryIDs = append(categoryIDs, id)
@@ -64,7 +59,7 @@ func handleListProjects(c *gin.Context) {
 	}
 
 	if len(categoryIDs) > 20 {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "en fazla 20 kategori seçilebilir"})
+		c.JSON(http.StatusBadRequest, gin.H{"error": "too_many_categories"})
 		return
 	}
 
@@ -130,11 +125,8 @@ func handleListProjects(c *gin.Context) {
 		FROM projects p
 		LEFT JOIN users u ON u.id = p.author_id
 		LEFT JOIN LATERAL (
-			SELECT 
-				COUNT(*) AS stars,
-				BOOL_OR(user_id = $1) AS starred
-			FROM project_stars
-			WHERE project_id = p.id
+			SELECT COUNT(*) AS stars, BOOL_OR(user_id = $1) AS starred
+			FROM project_stars WHERE project_id = p.id
 		) s ON true
 		LEFT JOIN LATERAL (
 			SELECT 
@@ -149,7 +141,7 @@ func handleListProjects(c *gin.Context) {
 		LIMIT $%d OFFSET $%d
 	`, whereClause, limitIdx, offsetIdx)
 
-	rows, err := db.Query(context.Background(), query, args...)
+	rows, err := db.Query(ctx, query, args...)
 	if err != nil {
 		serverError(c, err, "")
 		return
@@ -164,11 +156,7 @@ func handleListProjects(c *gin.Context) {
 		var categories []string
 		var catIDs []int
 
-		err := rows.Scan(
-			&id, &title, &description, &imageURL,
-			&stars, &starred, &author, &authorAvatar, &authorID,
-			&categories, &catIDs,
-		)
+		err := rows.Scan(&id, &title, &description, &imageURL, &stars, &starred, &author, &authorAvatar, &authorID, &categories, &catIDs)
 		if err != nil {
 			serverError(c, err, "")
 			return
@@ -199,14 +187,16 @@ func handleListProjects(c *gin.Context) {
 	c.JSON(http.StatusOK, projects)
 }
 
+// handleGetProject tek projenin tüm detayını döner.
 func handleGetProject(c *gin.Context) {
 	id, err := strconv.Atoi(c.Param("id"))
 	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "geçersiz proje id"})
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid_project_id"})
 		return
 	}
 
 	userID := c.GetInt("user_id")
+	ctx := c.Request.Context()
 
 	var project struct {
 		ID               int                      `json:"id"`
@@ -229,7 +219,7 @@ func handleGetProject(c *gin.Context) {
 		ContributorsList []map[string]interface{} `json:"contributorsList"`
 	}
 
-	err = db.QueryRow(context.Background(), `
+	err = db.QueryRow(ctx, `
 		SELECT 
 			p.id, p.title, p.description,
 			COALESCE(p.long_description, '') AS long_description,
@@ -238,23 +228,13 @@ func handleGetProject(c *gin.Context) {
 			COALESCE(p.image_url, '') AS image_url,
 			(SELECT COUNT(*) FROM project_stars WHERE project_id = p.id) AS stars,
 			EXISTS(SELECT 1 FROM project_stars WHERE project_id = p.id AND user_id = $2) AS starred,
-			(SELECT COUNT(*) FROM project_contributors WHERE project_id = p.id AND status = 'approved') AS contributors, p.status, p.created_at,
+			(SELECT COUNT(*) FROM project_contributors WHERE project_id = p.id AND status = 'approved') AS contributors,
+			p.status, p.created_at,
 			COALESCE(u.username, '') AS author,
 			COALESCE(u.avatar_url, '') AS author_avatar,
 			COALESCE(u.id, 0) AS author_id,
-			COALESCE(
-				(SELECT ARRAY_AGG(c.name ORDER BY c.name)
-				 FROM project_categories pc
-				 JOIN categories c ON c.id = pc.category_id
-				 WHERE pc.project_id = p.id),
-				ARRAY[]::varchar[]
-			) AS categories,
-			COALESCE(
-				(SELECT ARRAY_AGG(pc.category_id ORDER BY pc.category_id)
-				 FROM project_categories pc
-				 WHERE pc.project_id = p.id),
-				ARRAY[]::int[]
-			) AS category_ids
+			COALESCE((SELECT ARRAY_AGG(c.name ORDER BY c.name) FROM project_categories pc JOIN categories c ON c.id = pc.category_id WHERE pc.project_id = p.id), ARRAY[]::varchar[]) AS categories,
+			COALESCE((SELECT ARRAY_AGG(pc.category_id ORDER BY pc.category_id) FROM project_categories pc WHERE pc.project_id = p.id), ARRAY[]::int[]) AS category_ids
 		FROM projects p
 		LEFT JOIN users u ON u.id = p.author_id
 		WHERE p.id = $1
@@ -267,7 +247,7 @@ func handleGetProject(c *gin.Context) {
 	)
 
 	if err != nil {
-		c.JSON(http.StatusNotFound, gin.H{"error": "proje bulunamadı"})
+		c.JSON(http.StatusNotFound, gin.H{"error": "project_not_found"})
 		return
 	}
 
@@ -278,12 +258,8 @@ func handleGetProject(c *gin.Context) {
 		project.CategoryIDs = []int{}
 	}
 
-	// Katkıcıları ayrı bir sorgu ile çek (approved olanlar)
-	contribRows, err := db.Query(context.Background(), `
-		SELECT 
-			u.id AS user_id,
-			u.username,
-			COALESCE(u.avatar_url, '') AS avatar_url
+	contribRows, err := db.Query(ctx, `
+		SELECT u.id AS user_id, u.username, COALESCE(u.avatar_url, '') AS avatar_url
 		FROM project_contributors pc
 		JOIN users u ON u.id = pc.user_id
 		WHERE pc.project_id = $1 AND pc.status = 'approved'
@@ -312,9 +288,10 @@ func handleGetProject(c *gin.Context) {
 	c.JSON(http.StatusOK, project)
 }
 
-// Yeni proje oluşturur.
+// handleCreateProject yeni proje oluşturur. Proje limiti kontrolü içerir.
 func handleCreateProject(c *gin.Context) {
 	userID := c.GetInt("user_id")
+	ctx := c.Request.Context()
 
 	var input struct {
 		Title           string `json:"title"`
@@ -327,92 +304,100 @@ func handleCreateProject(c *gin.Context) {
 	}
 
 	if err := c.ShouldBindJSON(&input); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "geçersiz veri"})
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid_data"})
 		return
 	}
 
 	if input.Title == "" || input.Description == "" {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "title ve description zorunlu"})
+		c.JSON(http.StatusBadRequest, gin.H{"error": "title_and_description_required"})
 		return
 	}
 
-	// ✅ Sanitize (HTML tag temizle)
+	// Sanitize
 	input.Title = sanitizeText(input.Title)
 	input.Description = sanitizeText(input.Description)
 	input.LongDescription = sanitizeText(input.LongDescription)
 
-	// ✅ Uzunluk + karakter filtresi (tek tek alanlar)
-	if err := validateText("title", input.Title, MaxTitleLen, TitleRegex); err != nil {
+	// Metin validasyonları (min + max + regex)
+	if err := validateTextMinMax("title", input.Title, MinTitleLen, MaxTitleLen, TitleRegex, true); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
-	if err := validateText("description", input.Description, MaxDescriptionLen, TextRegex); err != nil {
+	if err := validateTextMinMax("description", input.Description, MinDescriptionLen, MaxDescriptionLen, TextRegex, true); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
-	if err := validateText("longDescription", input.LongDescription, MaxLongDescLen, TextRegex); err != nil {
+	if err := validateTextMinMax("longDescription", input.LongDescription, 0, MaxLongDescLen, TextRegex, false); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
 
-	// URL'ler için sadece uzunluk kontrolü (regex uygulanmaz, URL'de :// ve ? gibi karakterler olur)
+	// URL uzunluk + prefix kontrolü
 	if utf8.RuneCountInString(input.GithubURL) > MaxGithubURLLen {
-		c.JSON(http.StatusBadRequest, gin.H{
-			"error": fmt.Sprintf("githubUrl en fazla %d karakter olabilir", MaxGithubURLLen),
-		})
+		c.JSON(http.StatusBadRequest, gin.H{"error": "github_url_too_long"})
 		return
 	}
 	if utf8.RuneCountInString(input.DemoURL) > MaxDemoURLLen {
-		c.JSON(http.StatusBadRequest, gin.H{
-			"error": fmt.Sprintf("demoUrl en fazla %d karakter olabilir", MaxDemoURLLen),
-		})
+		c.JSON(http.StatusBadRequest, gin.H{"error": "demo_url_too_long"})
 		return
 	}
 	if utf8.RuneCountInString(input.ImageURL) > MaxImageURLLen {
-		c.JSON(http.StatusBadRequest, gin.H{
-			"error": fmt.Sprintf("imageUrl en fazla %d karakter olabilir", MaxImageURLLen),
-		})
+		c.JSON(http.StatusBadRequest, gin.H{"error": "image_url_too_long"})
 		return
 	}
 
 	if input.GithubURL != "" && !strings.HasPrefix(input.GithubURL, "http") {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "githubUrl geçersiz"})
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid_github_url"})
 		return
 	}
 	if input.DemoURL != "" && !strings.HasPrefix(input.DemoURL, "http") {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "demoUrl geçersiz"})
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid_demo_url"})
 		return
 	}
 	if input.ImageURL != "" && !strings.HasPrefix(input.ImageURL, "http") {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "imageUrl geçersiz"})
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid_image_url"})
 		return
 	}
 
 	if len(input.CategoryIDs) > MaxCategories {
-		c.JSON(http.StatusBadRequest, gin.H{
-			"error": fmt.Sprintf("en fazla %d kategori seçilebilir", MaxCategories),
-		})
+		c.JSON(http.StatusBadRequest, gin.H{"error": "too_many_categories"})
 		return
 	}
 
-	if !validateCategoryIDs(input.CategoryIDs) {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "geçersiz kategori id"})
+	if !validateCategoryIDs(ctx, input.CategoryIDs) {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid_category_id"})
 		return
 	}
 
-	tx, err := db.Begin(context.Background())
+	// Proje limiti kontrolü
+	var currentCount int
+	err := db.QueryRow(ctx,
+		`SELECT COUNT(*) FROM projects WHERE author_id = $1`, userID,
+	).Scan(&currentCount)
 	if err != nil {
 		serverError(c, err, "")
 		return
 	}
-	defer tx.Rollback(context.Background())
+
+	if currentCount >= MaxProjectsPerUser {
+		c.JSON(http.StatusForbidden, gin.H{
+			"error":       "project_limit_reached",
+			"current":     currentCount,
+			"maxProjects": MaxProjectsPerUser,
+		})
+		return
+	}
+
+	tx, err := db.Begin(ctx)
+	if err != nil {
+		serverError(c, err, "")
+		return
+	}
+	defer tx.Rollback(ctx)
 
 	var projectID int
-	err = tx.QueryRow(context.Background(), `
-		INSERT INTO projects (
-			title, description, long_description,
-			github_url, demo_url, image_url, author_id
-		)
+	err = tx.QueryRow(ctx, `
+		INSERT INTO projects (title, description, long_description, github_url, demo_url, image_url, author_id)
 		VALUES ($1, $2, $3, $4, $5, $6, $7)
 		RETURNING id
 	`,
@@ -425,7 +410,7 @@ func handleCreateProject(c *gin.Context) {
 	}
 
 	if len(input.CategoryIDs) > 0 {
-		_, err = tx.Exec(context.Background(), `
+		_, err = tx.Exec(ctx, `
 			INSERT INTO project_categories (project_id, category_id)
 			SELECT $1, UNNEST($2::int[])
 			ON CONFLICT DO NOTHING
@@ -436,7 +421,7 @@ func handleCreateProject(c *gin.Context) {
 		}
 	}
 
-	if err := tx.Commit(context.Background()); err != nil {
+	if err := tx.Commit(ctx); err != nil {
 		serverError(c, err, "")
 		return
 	}
@@ -444,16 +429,18 @@ func handleCreateProject(c *gin.Context) {
 	auditLog(c, userID, "create", "project", projectID)
 
 	c.JSON(http.StatusCreated, gin.H{
-		"id":      projectID,
-		"message": "proje oluşturuldu",
+		"id":           projectID,
+		"message":      "project_created",
+		"projectCount": currentCount + 1,
+		"maxProjects":  MaxProjectsPerUser,
 	})
 }
 
-// Kullanıcının kendi projelerini döner (sayfalama + sıralama).
+// handleMyProjects kullanıcının kendi projelerini döner.
 func handleMyProjects(c *gin.Context) {
 	userID := c.GetInt("user_id")
+	ctx := c.Request.Context()
 
-	// Sayfalama
 	limit := MaxProjectsPerPage
 	if l := c.Query("limit"); l != "" {
 		if n, err := strconv.Atoi(l); err == nil && n > 0 && n <= MaxProjectsPerPage {
@@ -467,7 +454,6 @@ func handleMyProjects(c *gin.Context) {
 		}
 	}
 
-	// Sıralama
 	sortParam := c.DefaultQuery("sort", "newest")
 
 	orderClause := "p.created_at DESC, p.id DESC"
@@ -475,21 +461,12 @@ func handleMyProjects(c *gin.Context) {
 		orderClause = "stars DESC, p.created_at DESC, p.id DESC"
 	}
 
-	// İstatistikler
 	var totalProjects, totalStars, totalContributors int
-	db.QueryRow(context.Background(), `
+	db.QueryRow(ctx, `
 		SELECT 
-			(SELECT COUNT(*) FROM projects WHERE author_id = $1) AS total_projects,
-			COALESCE((
-				SELECT SUM((SELECT COUNT(*) FROM project_stars WHERE project_id = p.id))
-				FROM projects p WHERE p.author_id = $1
-			), 0) AS total_stars,
-			COALESCE((
-				SELECT COUNT(*)
-				FROM project_contributors pc
-				JOIN projects p ON p.id = pc.project_id
-				WHERE p.author_id = $1 AND pc.status = 'approved'
-			), 0) AS total_contributors
+			(SELECT COUNT(*) FROM projects WHERE author_id = $1),
+			COALESCE((SELECT SUM((SELECT COUNT(*) FROM project_stars WHERE project_id = p.id)) FROM projects p WHERE p.author_id = $1), 0),
+			COALESCE((SELECT COUNT(*) FROM project_contributors pc JOIN projects p ON p.id = pc.project_id WHERE p.author_id = $1 AND pc.status = 'approved'), 0)
 	`, userID).Scan(&totalProjects, &totalStars, &totalContributors)
 
 	query := fmt.Sprintf(`
@@ -499,26 +476,15 @@ func handleMyProjects(c *gin.Context) {
 			(SELECT COUNT(*) FROM project_stars WHERE project_id = p.id) AS stars,
 			(SELECT COUNT(*) FROM project_contributors WHERE project_id = p.id AND status = 'approved') AS contributors,
 			p.created_at,
-			COALESCE(
-				(SELECT ARRAY_AGG(c.name ORDER BY c.name)
-				 FROM project_categories pc
-				 JOIN categories c ON c.id = pc.category_id
-				 WHERE pc.project_id = p.id),
-				ARRAY[]::varchar[]
-			) AS categories,
-			COALESCE(
-				(SELECT ARRAY_AGG(pc.category_id ORDER BY pc.category_id)
-				 FROM project_categories pc
-				 WHERE pc.project_id = p.id),
-				ARRAY[]::int[]
-			) AS category_ids
+			COALESCE((SELECT ARRAY_AGG(c.name ORDER BY c.name) FROM project_categories pc JOIN categories c ON c.id = pc.category_id WHERE pc.project_id = p.id), ARRAY[]::varchar[]) AS categories,
+			COALESCE((SELECT ARRAY_AGG(pc.category_id ORDER BY pc.category_id) FROM project_categories pc WHERE pc.project_id = p.id), ARRAY[]::int[]) AS category_ids
 		FROM projects p
 		WHERE p.author_id = $1
 		ORDER BY %s
 		LIMIT $2 OFFSET $3
 	`, orderClause)
 
-	rows, err := db.Query(context.Background(), query, userID, limit+1, offset)
+	rows, err := db.Query(ctx, query, userID, limit+1, offset)
 	if err != nil {
 		serverError(c, err, "")
 		return
@@ -535,11 +501,7 @@ func handleMyProjects(c *gin.Context) {
 		var categories []string
 		var categoryIDs []int
 
-		if err := rows.Scan(
-			&id, &title, &description, &imageURL,
-			&stars, &contributors, &projCreatedAt,
-			&categories, &categoryIDs,
-		); err != nil {
+		if err := rows.Scan(&id, &title, &description, &imageURL, &stars, &contributors, &projCreatedAt, &categories, &categoryIDs); err != nil {
 			serverError(c, err, "")
 			return
 		}
@@ -580,30 +542,29 @@ func handleMyProjects(c *gin.Context) {
 	})
 }
 
-// Yıldızla.
+// handleStarProject projeyi yıldızlar.
 func handleStarProject(c *gin.Context) {
 	userID := c.GetInt("user_id")
+	ctx := c.Request.Context()
 
 	projectID, err := strconv.Atoi(c.Param("id"))
 	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "geçersiz proje id"})
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid_project_id"})
 		return
 	}
 
 	var authorID int
-	err = db.QueryRow(context.Background(),
-		`SELECT author_id FROM projects WHERE id = $1`, projectID,
-	).Scan(&authorID)
+	err = db.QueryRow(ctx, `SELECT author_id FROM projects WHERE id = $1`, projectID).Scan(&authorID)
 	if err != nil {
-		c.JSON(http.StatusNotFound, gin.H{"error": "proje bulunamadı"})
+		c.JSON(http.StatusNotFound, gin.H{"error": "project_not_found"})
 		return
 	}
 	if authorID == userID {
-		c.JSON(http.StatusForbidden, gin.H{"error": "kendi projeni yıldızlayamazsın"})
+		c.JSON(http.StatusForbidden, gin.H{"error": "cannot_star_own_project"})
 		return
 	}
 
-	_, err = db.Exec(context.Background(), `
+	_, err = db.Exec(ctx, `
 		INSERT INTO project_stars (project_id, user_id)
 		VALUES ($1, $2)
 		ON CONFLICT DO NOTHING
@@ -614,26 +575,24 @@ func handleStarProject(c *gin.Context) {
 	}
 
 	var count int
-	db.QueryRow(context.Background(),
-		`SELECT COUNT(*) FROM project_stars WHERE project_id = $1`, projectID,
-	).Scan(&count)
+	db.QueryRow(ctx, `SELECT COUNT(*) FROM project_stars WHERE project_id = $1`, projectID).Scan(&count)
 
 	c.JSON(http.StatusOK, gin.H{"stars": count, "starred": true})
 }
 
-// Yıldız geri al.
+// handleUnstarProject yıldızı geri alır.
 func handleUnstarProject(c *gin.Context) {
 	userID := c.GetInt("user_id")
+	ctx := c.Request.Context()
 
 	projectID, err := strconv.Atoi(c.Param("id"))
 	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "geçersiz proje id"})
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid_project_id"})
 		return
 	}
 
-	_, err = db.Exec(context.Background(), `
-		DELETE FROM project_stars
-		WHERE project_id = $1 AND user_id = $2
+	_, err = db.Exec(ctx, `
+		DELETE FROM project_stars WHERE project_id = $1 AND user_id = $2
 	`, projectID, userID)
 	if err != nil {
 		serverError(c, err, "")
@@ -641,33 +600,30 @@ func handleUnstarProject(c *gin.Context) {
 	}
 
 	var count int
-	db.QueryRow(context.Background(),
-		`SELECT COUNT(*) FROM project_stars WHERE project_id = $1`, projectID,
-	).Scan(&count)
+	db.QueryRow(ctx, `SELECT COUNT(*) FROM project_stars WHERE project_id = $1`, projectID).Scan(&count)
 
 	c.JSON(http.StatusOK, gin.H{"stars": count, "starred": false})
 }
 
-// Var olan projeyi günceller (sadece yazar).
+// handleUpdateProject var olan projeyi günceller (sadece yazar).
 func handleUpdateProject(c *gin.Context) {
 	userID := c.GetInt("user_id")
+	ctx := c.Request.Context()
 
 	projectID, err := strconv.Atoi(c.Param("id"))
 	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "geçersiz proje id"})
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid_project_id"})
 		return
 	}
 
 	var authorID int
-	err = db.QueryRow(context.Background(),
-		`SELECT author_id FROM projects WHERE id = $1`, projectID,
-	).Scan(&authorID)
+	err = db.QueryRow(ctx, `SELECT author_id FROM projects WHERE id = $1`, projectID).Scan(&authorID)
 	if err != nil {
-		c.JSON(http.StatusNotFound, gin.H{"error": "proje bulunamadı"})
+		c.JSON(http.StatusNotFound, gin.H{"error": "project_not_found"})
 		return
 	}
 	if authorID != userID {
-		c.JSON(http.StatusForbidden, gin.H{"error": "bu projeyi düzenleme yetkin yok"})
+		c.JSON(http.StatusForbidden, gin.H{"error": "forbidden"})
 		return
 	}
 
@@ -682,12 +638,12 @@ func handleUpdateProject(c *gin.Context) {
 	}
 
 	if err := c.ShouldBindJSON(&input); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "geçersiz veri"})
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid_data"})
 		return
 	}
 
 	if input.Title == "" || input.Description == "" {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "title ve description zorunlu"})
+		c.JSON(http.StatusBadRequest, gin.H{"error": "title_and_description_required"})
 		return
 	}
 
@@ -695,79 +651,67 @@ func handleUpdateProject(c *gin.Context) {
 	input.Description = sanitizeText(input.Description)
 	input.LongDescription = sanitizeText(input.LongDescription)
 
-	// ✅ Uzunluk + karakter filtresi
-	if err := validateText("title", input.Title, MaxTitleLen, TitleRegex); err != nil {
+	// Metin validasyonları (min + max + regex)
+	if err := validateTextMinMax("title", input.Title, MinTitleLen, MaxTitleLen, TitleRegex, true); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
-	if err := validateText("description", input.Description, MaxDescriptionLen, TextRegex); err != nil {
+	if err := validateTextMinMax("description", input.Description, MinDescriptionLen, MaxDescriptionLen, TextRegex, true); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
-	if err := validateText("longDescription", input.LongDescription, MaxLongDescLen, TextRegex); err != nil {
+	if err := validateTextMinMax("longDescription", input.LongDescription, 0, MaxLongDescLen, TextRegex, false); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
 
 	if utf8.RuneCountInString(input.GithubURL) > MaxGithubURLLen {
-		c.JSON(http.StatusBadRequest, gin.H{
-			"error": fmt.Sprintf("githubUrl en fazla %d karakter olabilir", MaxGithubURLLen),
-		})
+		c.JSON(http.StatusBadRequest, gin.H{"error": "github_url_too_long"})
 		return
 	}
 	if utf8.RuneCountInString(input.DemoURL) > MaxDemoURLLen {
-		c.JSON(http.StatusBadRequest, gin.H{
-			"error": fmt.Sprintf("demoUrl en fazla %d karakter olabilir", MaxDemoURLLen),
-		})
+		c.JSON(http.StatusBadRequest, gin.H{"error": "demo_url_too_long"})
 		return
 	}
 	if utf8.RuneCountInString(input.ImageURL) > MaxImageURLLen {
-		c.JSON(http.StatusBadRequest, gin.H{
-			"error": fmt.Sprintf("imageUrl en fazla %d karakter olabilir", MaxImageURLLen),
-		})
+		c.JSON(http.StatusBadRequest, gin.H{"error": "image_url_too_long"})
 		return
 	}
 
 	if input.GithubURL != "" && !strings.HasPrefix(input.GithubURL, "http") {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "githubUrl geçersiz"})
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid_github_url"})
 		return
 	}
 	if input.DemoURL != "" && !strings.HasPrefix(input.DemoURL, "http") {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "demoUrl geçersiz"})
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid_demo_url"})
 		return
 	}
 	if input.ImageURL != "" && !strings.HasPrefix(input.ImageURL, "http") {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "imageUrl geçersiz"})
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid_image_url"})
 		return
 	}
 
 	if len(input.CategoryIDs) > MaxCategories {
-		c.JSON(http.StatusBadRequest, gin.H{
-			"error": fmt.Sprintf("en fazla %d kategori seçilebilir", MaxCategories),
-		})
+		c.JSON(http.StatusBadRequest, gin.H{"error": "too_many_categories"})
 		return
 	}
 
-	if !validateCategoryIDs(input.CategoryIDs) {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "geçersiz kategori id"})
+	if !validateCategoryIDs(ctx, input.CategoryIDs) {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid_category_id"})
 		return
 	}
 
-	tx, err := db.Begin(context.Background())
+	tx, err := db.Begin(ctx)
 	if err != nil {
 		serverError(c, err, "")
 		return
 	}
-	defer tx.Rollback(context.Background())
+	defer tx.Rollback(ctx)
 
-	_, err = tx.Exec(context.Background(), `
+	_, err = tx.Exec(ctx, `
 		UPDATE projects
-		SET title = $1,
-		    description = $2,
-		    long_description = $3,
-		    github_url = $4,
-		    demo_url = $5,
-		    image_url = $6,
+		SET title = $1, description = $2, long_description = $3,
+		    github_url = $4, demo_url = $5, image_url = $6,
 		    updated_at = NOW()
 		WHERE id = $7
 	`, input.Title, input.Description, input.LongDescription,
@@ -777,15 +721,14 @@ func handleUpdateProject(c *gin.Context) {
 		return
 	}
 
-	_, err = tx.Exec(context.Background(),
-		`DELETE FROM project_categories WHERE project_id = $1`, projectID)
+	_, err = tx.Exec(ctx, `DELETE FROM project_categories WHERE project_id = $1`, projectID)
 	if err != nil {
 		serverError(c, err, "")
 		return
 	}
 
 	if len(input.CategoryIDs) > 0 {
-		_, err = tx.Exec(context.Background(), `
+		_, err = tx.Exec(ctx, `
 			INSERT INTO project_categories (project_id, category_id)
 			SELECT $1, UNNEST($2::int[])
 			ON CONFLICT DO NOTHING
@@ -796,7 +739,7 @@ func handleUpdateProject(c *gin.Context) {
 		}
 	}
 
-	if err := tx.Commit(context.Background()); err != nil {
+	if err := tx.Commit(ctx); err != nil {
 		serverError(c, err, "")
 		return
 	}
@@ -805,35 +748,33 @@ func handleUpdateProject(c *gin.Context) {
 
 	c.JSON(http.StatusOK, gin.H{
 		"id":      projectID,
-		"message": "proje güncellendi",
+		"message": "project_updated",
 	})
 }
 
-// Projeyi siler (sadece yazar).
+// handleDeleteProject projeyi siler (sadece yazar). projectCount döner.
 func handleDeleteProject(c *gin.Context) {
 	userID := c.GetInt("user_id")
+	ctx := c.Request.Context()
 
 	projectID, err := strconv.Atoi(c.Param("id"))
 	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "geçersiz proje id"})
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid_project_id"})
 		return
 	}
 
 	var authorID int
-	err = db.QueryRow(context.Background(),
-		`SELECT author_id FROM projects WHERE id = $1`, projectID,
-	).Scan(&authorID)
+	err = db.QueryRow(ctx, `SELECT author_id FROM projects WHERE id = $1`, projectID).Scan(&authorID)
 	if err != nil {
-		c.JSON(http.StatusNotFound, gin.H{"error": "proje bulunamadı"})
+		c.JSON(http.StatusNotFound, gin.H{"error": "project_not_found"})
 		return
 	}
 	if authorID != userID {
-		c.JSON(http.StatusForbidden, gin.H{"error": "bu projeyi silme yetkin yok"})
+		c.JSON(http.StatusForbidden, gin.H{"error": "forbidden"})
 		return
 	}
 
-	_, err = db.Exec(context.Background(),
-		`DELETE FROM projects WHERE id = $1`, projectID)
+	_, err = db.Exec(ctx, `DELETE FROM projects WHERE id = $1`, projectID)
 	if err != nil {
 		serverError(c, err, "")
 		return
@@ -841,5 +782,13 @@ func handleDeleteProject(c *gin.Context) {
 
 	auditLog(c, userID, "delete", "project", projectID)
 
-	c.JSON(http.StatusOK, gin.H{"message": "proje silindi"})
+	// Silme sonrası güncel proje sayısı
+	var newCount int
+	db.QueryRow(ctx, `SELECT COUNT(*) FROM projects WHERE author_id = $1`, userID).Scan(&newCount)
+
+	c.JSON(http.StatusOK, gin.H{
+		"message":      "project_deleted",
+		"projectCount": newCount,
+		"maxProjects":  MaxProjectsPerUser,
+	})
 }

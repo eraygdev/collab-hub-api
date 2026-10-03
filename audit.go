@@ -7,7 +7,8 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
-// Audit log kaydı oluşturur (async değil, basit).
+// auditLog audit_logs tablosuna kayıt atar.
+// Kasıtlı olarak context.Background() kullanır — response iptal olsa bile log yazılmalı.
 func auditLog(c *gin.Context, userID int, action, entityType string, entityID int) {
 	var uid interface{} = userID
 	if userID == 0 {

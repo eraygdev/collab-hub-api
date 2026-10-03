@@ -1,7 +1,6 @@
 package main
 
 import (
-	"context"
 	"net/http"
 	"strconv"
 	"strings"
@@ -12,75 +11,65 @@ import (
 
 const MaxContributorMessageLen = 300
 
-// Projeye katılma başvurusu gönderir.
+// handleJoinProject projeye katılma başvurusu gönderir.
 func handleJoinProject(c *gin.Context) {
 	userID := c.GetInt("user_id")
+	ctx := c.Request.Context()
 
 	projectID, err := strconv.Atoi(c.Param("id"))
 	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "geçersiz proje id"})
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid_project_id"})
 		return
 	}
 
-	// Proje var mı + yazarı kim?
 	var authorID int
-	err = db.QueryRow(context.Background(),
+	err = db.QueryRow(ctx,
 		`SELECT author_id FROM projects WHERE id = $1`, projectID,
 	).Scan(&authorID)
 	if err != nil {
-		c.JSON(http.StatusNotFound, gin.H{"error": "proje bulunamadı"})
+		c.JSON(http.StatusNotFound, gin.H{"error": "project_not_found"})
 		return
 	}
 
-	// Kendi projesine katılamaz
 	if authorID == userID {
-		c.JSON(http.StatusForbidden, gin.H{"error": "kendi projenize katılamazsınız"})
+		c.JSON(http.StatusForbidden, gin.H{"error": "cannot_join_own_project"})
 		return
 	}
 
-	// Kullanıcı premium mu?
 	var isPremium bool
-	db.QueryRow(context.Background(),
-		`SELECT is_premium FROM users WHERE id = $1`, userID,
-	).Scan(&isPremium)
+	db.QueryRow(ctx, `SELECT is_premium FROM users WHERE id = $1`, userID).Scan(&isPremium)
 
-	// Body parse
 	var input struct {
 		Message string `json:"message"`
 	}
 	c.ShouldBindJSON(&input)
 
-	// Premium değilse mesajı yok say
 	message := ""
 	if isPremium {
 		message = strings.TrimSpace(input.Message)
 		if utf8.RuneCountInString(message) > MaxContributorMessageLen {
-			c.JSON(http.StatusBadRequest, gin.H{
-				"error": "mesaj en fazla 300 karakter olabilir",
-			})
+			c.JSON(http.StatusBadRequest, gin.H{"error": "message_too_long"})
 			return
 		}
 	}
 
-	// Zaten başvurmuş mu?
 	var existingID int
 	var existingStatus string
-	err = db.QueryRow(context.Background(),
+	err = db.QueryRow(ctx,
 		`SELECT id, status FROM project_contributors WHERE project_id = $1 AND user_id = $2`,
 		projectID, userID,
 	).Scan(&existingID, &existingStatus)
 
 	if err == nil {
 		if existingStatus == "pending" {
-			c.JSON(http.StatusConflict, gin.H{"error": "zaten başvurunuz onay bekliyor"})
+			c.JSON(http.StatusConflict, gin.H{"error": "already_pending"})
 			return
 		}
 		if existingStatus == "approved" {
-			c.JSON(http.StatusConflict, gin.H{"error": "zaten bu projenin katkıcısısınız"})
+			c.JSON(http.StatusConflict, gin.H{"error": "already_contributor"})
 			return
 		}
-		// rejected ise tekrar başvurabilir → UPDATE
-		_, err = db.Exec(context.Background(), `
+		_, err = db.Exec(ctx, `
 			UPDATE project_contributors
 			SET status = 'pending', message = $1, created_at = NOW(), approved_at = NULL
 			WHERE id = $2
@@ -89,17 +78,16 @@ func handleJoinProject(c *gin.Context) {
 			serverError(c, err, "")
 			return
 		}
-		c.JSON(http.StatusOK, gin.H{"message": "başvuru tekrar gönderildi", "status": "pending"})
+		c.JSON(http.StatusOK, gin.H{"message": "application_resent", "status": "pending"})
 		return
 	}
 
-	// Yeni başvuru
 	var msg interface{} = nil
 	if message != "" {
 		msg = message
 	}
 
-	_, err = db.Exec(context.Background(), `
+	_, err = db.Exec(ctx, `
 		INSERT INTO project_contributors (project_id, user_id, status, message)
 		VALUES ($1, $2, 'pending', $3)
 	`, projectID, userID, msg)
@@ -111,51 +99,48 @@ func handleJoinProject(c *gin.Context) {
 	auditLog(c, userID, "join_request", "project", projectID)
 
 	c.JSON(http.StatusCreated, gin.H{
-		"message": "başvuru gönderildi",
+		"message": "application_sent",
 		"status":  "pending",
 	})
 }
 
-// Kullanıcı kendi isteğiyle projeden ayrılır (katkıcılığı bırakır).
+// handleLeaveProject kullanıcının kendi isteğiyle projeden ayrılmasını sağlar.
 func handleLeaveProject(c *gin.Context) {
 	userID := c.GetInt("user_id")
+	ctx := c.Request.Context()
 
 	projectID, err := strconv.Atoi(c.Param("id"))
 	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "geçersiz proje id"})
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid_project_id"})
 		return
 	}
 
-	// Proje var mı?
 	var authorID int
-	err = db.QueryRow(context.Background(),
+	err = db.QueryRow(ctx,
 		`SELECT author_id FROM projects WHERE id = $1`, projectID,
 	).Scan(&authorID)
 	if err != nil {
-		c.JSON(http.StatusNotFound, gin.H{"error": "proje bulunamadı"})
+		c.JSON(http.StatusNotFound, gin.H{"error": "project_not_found"})
 		return
 	}
 
-	// Proje sahibi ayrılamaz
 	if authorID == userID {
-		c.JSON(http.StatusForbidden, gin.H{"error": "proje sahibi ayrılamaz"})
+		c.JSON(http.StatusForbidden, gin.H{"error": "owner_cannot_leave"})
 		return
 	}
 
-	// Kullanıcının bu projede approved kaydı var mı?
 	var existingID int
-	err = db.QueryRow(context.Background(), `
+	err = db.QueryRow(ctx, `
 		SELECT id FROM project_contributors
 		WHERE project_id = $1 AND user_id = $2 AND status = 'approved'
 	`, projectID, userID).Scan(&existingID)
 
 	if err != nil {
-		c.JSON(http.StatusNotFound, gin.H{"error": "bu projede katkıcı değilsiniz"})
+		c.JSON(http.StatusNotFound, gin.H{"error": "not_a_contributor"})
 		return
 	}
 
-	// Kaydı sil (kullanıcı tekrar başvurabilsin)
-	_, err = db.Exec(context.Background(),
+	_, err = db.Exec(ctx,
 		`DELETE FROM project_contributors WHERE id = $1`, existingID)
 	if err != nil {
 		serverError(c, err, "")
@@ -164,21 +149,21 @@ func handleLeaveProject(c *gin.Context) {
 
 	auditLog(c, userID, "leave", "project", projectID)
 
-	c.JSON(http.StatusOK, gin.H{"message": "projeden ayrıldınız"})
+	c.JSON(http.StatusOK, gin.H{"message": "left_project"})
 }
 
-// Kullanıcının bu projedeki başvuru durumunu döner.
+// handleMyJoinStatus kullanıcının bu projedeki başvuru durumunu döner.
 func handleMyJoinStatus(c *gin.Context) {
 	userID := c.GetInt("user_id")
 
 	projectID, err := strconv.Atoi(c.Param("id"))
 	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "geçersiz proje id"})
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid_project_id"})
 		return
 	}
 
 	var status string
-	err = db.QueryRow(context.Background(),
+	err = db.QueryRow(c.Request.Context(),
 		`SELECT status FROM project_contributors WHERE project_id = $1 AND user_id = $2`,
 		projectID, userID,
 	).Scan(&status)
@@ -191,20 +176,15 @@ func handleMyJoinStatus(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"status": status})
 }
 
-// Proje sahibinin aldığı bekleyen başvuruları döner.
+// handleContributorRequests proje sahibinin bekleyen başvurularını döner.
 func handleContributorRequests(c *gin.Context) {
 	userID := c.GetInt("user_id")
 
-	rows, err := db.Query(context.Background(), `
+	rows, err := db.Query(c.Request.Context(), `
 		SELECT 
-			pc.id,
-			pc.project_id,
-			p.title AS project_title,
-			pc.user_id,
-			u.username,
-			COALESCE(u.avatar_url, '') AS avatar_url,
-			COALESCE(pc.message, '') AS message,
-			pc.created_at
+			pc.id, pc.project_id, p.title AS project_title,
+			pc.user_id, u.username, COALESCE(u.avatar_url, '') AS avatar_url,
+			COALESCE(pc.message, '') AS message, pc.created_at
 		FROM project_contributors pc
 		JOIN projects p ON p.id = pc.project_id
 		JOIN users u ON u.id = pc.user_id
@@ -223,10 +203,7 @@ func handleContributorRequests(c *gin.Context) {
 		var projectTitle, username, avatarURL, message string
 		var createdAt interface{}
 
-		if err := rows.Scan(
-			&id, &projectID, &projectTitle, &requesterID,
-			&username, &avatarURL, &message, &createdAt,
-		); err != nil {
+		if err := rows.Scan(&id, &projectID, &projectTitle, &requesterID, &username, &avatarURL, &message, &createdAt); err != nil {
 			serverError(c, err, "")
 			return
 		}
@@ -246,28 +223,29 @@ func handleContributorRequests(c *gin.Context) {
 	c.JSON(http.StatusOK, requests)
 }
 
-// Başvuruyu onaylar.
+// handleApproveRequest başvuruyu onaylar.
 func handleApproveRequest(c *gin.Context) {
 	handleRequestAction(c, "approve")
 }
 
-// Başvuruyu reddeder.
+// handleRejectRequest başvuruyu reddeder.
 func handleRejectRequest(c *gin.Context) {
 	handleRequestAction(c, "reject")
 }
 
+// handleRequestAction approve/reject ortak işlemini yürütür.
 func handleRequestAction(c *gin.Context, action string) {
 	userID := c.GetInt("user_id")
+	ctx := c.Request.Context()
 
 	requestID, err := strconv.Atoi(c.Param("id"))
 	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "geçersiz başvuru id"})
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid_request_id"})
 		return
 	}
 
-	// Başvuruyu ve projenin sahibini bul
 	var projectAuthorID int
-	err = db.QueryRow(context.Background(), `
+	err = db.QueryRow(ctx, `
 		SELECT p.author_id
 		FROM project_contributors pc
 		JOIN projects p ON p.id = pc.project_id
@@ -275,23 +253,23 @@ func handleRequestAction(c *gin.Context, action string) {
 	`, requestID).Scan(&projectAuthorID)
 
 	if err != nil {
-		c.JSON(http.StatusNotFound, gin.H{"error": "başvuru bulunamadı"})
+		c.JSON(http.StatusNotFound, gin.H{"error": "request_not_found"})
 		return
 	}
 
 	if projectAuthorID != userID {
-		c.JSON(http.StatusForbidden, gin.H{"error": "bu başvuruyu yönetme yetkiniz yok"})
+		c.JSON(http.StatusForbidden, gin.H{"error": "forbidden"})
 		return
 	}
 
 	if action == "approve" {
-		_, err = db.Exec(context.Background(), `
+		_, err = db.Exec(ctx, `
 			UPDATE project_contributors
 			SET status = 'approved', approved_at = NOW()
 			WHERE id = $1
 		`, requestID)
 	} else {
-		_, err = db.Exec(context.Background(), `
+		_, err = db.Exec(ctx, `
 			UPDATE project_contributors
 			SET status = 'rejected'
 			WHERE id = $1
@@ -303,38 +281,39 @@ func handleRequestAction(c *gin.Context, action string) {
 		return
 	}
 
-	c.JSON(http.StatusOK, gin.H{"message": "işlem tamam"})
+	c.JSON(http.StatusOK, gin.H{"message": "action_completed"})
 }
 
-// Katkıcıyı projeden çıkarır (sadece proje sahibi).
+// handleRemoveContributor katkıcıyı projeden çıkarır (sadece proje sahibi).
 func handleRemoveContributor(c *gin.Context) {
 	userID := c.GetInt("user_id")
+	ctx := c.Request.Context()
 
 	projectID, err := strconv.Atoi(c.Param("id"))
 	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "geçersiz proje id"})
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid_project_id"})
 		return
 	}
 	contributorUserID, err := strconv.Atoi(c.Param("userId"))
 	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "geçersiz kullanıcı id"})
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid_user_id"})
 		return
 	}
 
 	var authorID int
-	err = db.QueryRow(context.Background(),
+	err = db.QueryRow(ctx,
 		`SELECT author_id FROM projects WHERE id = $1`, projectID,
 	).Scan(&authorID)
 	if err != nil {
-		c.JSON(http.StatusNotFound, gin.H{"error": "proje bulunamadı"})
+		c.JSON(http.StatusNotFound, gin.H{"error": "project_not_found"})
 		return
 	}
 	if authorID != userID {
-		c.JSON(http.StatusForbidden, gin.H{"error": "yetkiniz yok"})
+		c.JSON(http.StatusForbidden, gin.H{"error": "forbidden"})
 		return
 	}
 
-	_, err = db.Exec(context.Background(), `
+	_, err = db.Exec(ctx, `
 		DELETE FROM project_contributors
 		WHERE project_id = $1 AND user_id = $2
 	`, projectID, contributorUserID)
@@ -343,33 +322,22 @@ func handleRemoveContributor(c *gin.Context) {
 		return
 	}
 
-	c.JSON(http.StatusOK, gin.H{"message": "katkıcı çıkarıldı"})
+	c.JSON(http.StatusOK, gin.H{"message": "contributor_removed"})
 }
 
-// Kullanıcının katkıcı olduğu projeleri döner.
+// handleMyContributions kullanıcının katkıcı olduğu projeleri döner.
 func handleMyContributions(c *gin.Context) {
 	userID := c.GetInt("user_id")
 
-	rows, err := db.Query(context.Background(), `
+	rows, err := db.Query(c.Request.Context(), `
 		SELECT 
 			p.id, p.title, p.description,
 			COALESCE(p.image_url, '') AS image_url,
 			(SELECT COUNT(*) FROM project_stars WHERE project_id = p.id) AS stars,
 			COALESCE(u.username, '') AS author,
 			COALESCE(u.avatar_url, '') AS author_avatar,
-			COALESCE(
-				(SELECT ARRAY_AGG(c.name ORDER BY c.name)
-				 FROM project_categories pc
-				 JOIN categories c ON c.id = pc.category_id
-				 WHERE pc.project_id = p.id),
-				ARRAY[]::varchar[]
-			) AS categories,
-			COALESCE(
-				(SELECT ARRAY_AGG(pc.category_id ORDER BY pc.category_id)
-				 FROM project_categories pc
-				 WHERE pc.project_id = p.id),
-				ARRAY[]::int[]
-			) AS category_ids
+			COALESCE((SELECT ARRAY_AGG(c.name ORDER BY c.name) FROM project_categories pc JOIN categories c ON c.id = pc.category_id WHERE pc.project_id = p.id), ARRAY[]::varchar[]) AS categories,
+			COALESCE((SELECT ARRAY_AGG(pc.category_id ORDER BY pc.category_id) FROM project_categories pc WHERE pc.project_id = p.id), ARRAY[]::int[]) AS category_ids
 		FROM project_contributors pc
 		JOIN projects p ON p.id = pc.project_id
 		LEFT JOIN users u ON u.id = p.author_id
@@ -389,11 +357,7 @@ func handleMyContributions(c *gin.Context) {
 		var categories []string
 		var categoryIDs []int
 
-		if err := rows.Scan(
-			&id, &title, &description, &imageURL,
-			&stars, &author, &authorAvatar,
-			&categories, &categoryIDs,
-		); err != nil {
+		if err := rows.Scan(&id, &title, &description, &imageURL, &stars, &author, &authorAvatar, &categories, &categoryIDs); err != nil {
 			serverError(c, err, "")
 			return
 		}
@@ -421,7 +385,7 @@ func handleMyContributions(c *gin.Context) {
 	c.JSON(http.StatusOK, projects)
 }
 
-// nullableString: boş string ise nil döner (DB'ye NULL yazmak için).
+// nullableString boş string için nil döner (DB'ye NULL yazmak için).
 func nullableString(s string) interface{} {
 	if s == "" {
 		return nil

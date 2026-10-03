@@ -1,7 +1,6 @@
 package main
 
 import (
-	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -19,8 +18,10 @@ func handleGoogleLogin(c *gin.Context) {
 }
 
 func handleGoogleCallback(c *gin.Context) {
+	ctx := c.Request.Context()
 	code := c.Query("code")
-	token, err := googleOauthConfig.Exchange(c.Request.Context(), code)
+
+	token, err := googleOauthConfig.Exchange(ctx, code)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
@@ -43,7 +44,7 @@ func handleGoogleCallback(c *gin.Context) {
 	picture, _ := info["picture"].(string)
 
 	if email == "" {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Google did not return email"})
+		c.JSON(http.StatusBadRequest, gin.H{"error": "google_no_email"})
 		return
 	}
 	if name == "" {
@@ -58,7 +59,7 @@ func handleGoogleCallback(c *gin.Context) {
 		isPremium  bool
 	)
 
-	err = db.QueryRow(context.Background(), `
+	err = db.QueryRow(ctx, `
 		INSERT INTO users (username, email, google_id, avatar_url)
 		VALUES ($1, $2, $3, $4)
 		ON CONFLICT (email) DO UPDATE
@@ -73,7 +74,7 @@ func handleGoogleCallback(c *gin.Context) {
 
 	auditLog(c, userID, "login", "user", userID)
 
-	jwtToken, err := generateJWT(userID, email, dbUsername, isPremium)
+	jwtToken, err := generateJWT(userID, dbUsername, isPremium)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
@@ -91,8 +92,10 @@ func handleGithubLogin(c *gin.Context) {
 }
 
 func handleGithubCallback(c *gin.Context) {
+	ctx := c.Request.Context()
 	code := c.Query("code")
-	token, err := githubOauthConfig.Exchange(c.Request.Context(), code)
+
+	token, err := githubOauthConfig.Exchange(ctx, code)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
@@ -100,7 +103,7 @@ func handleGithubCallback(c *gin.Context) {
 
 	client := &http.Client{}
 
-	req, _ := http.NewRequest("GET", "https://api.github.com/user", nil)
+	req, _ := http.NewRequestWithContext(ctx, "GET", "https://api.github.com/user", nil)
 	req.Header.Set("Authorization", "Bearer "+token.AccessToken)
 	req.Header.Set("Accept", "application/vnd.github+json")
 
@@ -126,7 +129,7 @@ func handleGithubCallback(c *gin.Context) {
 
 	email, _ := info["email"].(string)
 	if email == "" {
-		emailReq, _ := http.NewRequest("GET", "https://api.github.com/user/emails", nil)
+		emailReq, _ := http.NewRequestWithContext(ctx, "GET", "https://api.github.com/user/emails", nil)
 		emailReq.Header.Set("Authorization", "Bearer "+token.AccessToken)
 		emailReq.Header.Set("Accept", "application/vnd.github+json")
 
@@ -159,7 +162,7 @@ func handleGithubCallback(c *gin.Context) {
 		dbUsername string
 		isPremium  bool
 	)
-	err = db.QueryRow(context.Background(), `
+	err = db.QueryRow(ctx, `
 		INSERT INTO users (username, email, github_id, avatar_url, bio)
 		VALUES ($1, $2, $3, $4, $5)
 		ON CONFLICT (email) DO UPDATE
@@ -174,7 +177,7 @@ func handleGithubCallback(c *gin.Context) {
 
 	auditLog(c, userID, "login", "user", userID)
 
-	jwtToken, err := generateJWT(userID, email, dbUsername, isPremium)
+	jwtToken, err := generateJWT(userID, dbUsername, isPremium)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return

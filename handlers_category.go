@@ -7,12 +7,10 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
-// Tüm kategorileri alfabetik döner (public endpoint).
+// handleListCategories tüm kategorileri alfabetik döner.
 func handleListCategories(c *gin.Context) {
-	rows, err := db.Query(context.Background(), `
-		SELECT id, name, slug
-		FROM categories
-		ORDER BY name ASC
+	rows, err := db.Query(c.Request.Context(), `
+		SELECT id, name, slug FROM categories ORDER BY name ASC
 	`)
 	if err != nil {
 		serverError(c, err, "")
@@ -40,13 +38,13 @@ func handleListCategories(c *gin.Context) {
 	c.JSON(http.StatusOK, categories)
 }
 
-// Kategori ID'lerinin geçerli olduğunu doğrular.
-func validateCategoryIDs(categoryIDs []int) bool {
+// validateCategoryIDs verilen ID'lerin hepsinin geçerli olduğunu doğrular.
+func validateCategoryIDs(ctx context.Context, categoryIDs []int) bool {
 	if len(categoryIDs) == 0 {
 		return true
 	}
 	var count int
-	err := db.QueryRow(context.Background(),
+	err := db.QueryRow(ctx,
 		`SELECT COUNT(*) FROM categories WHERE id = ANY($1)`,
 		categoryIDs,
 	).Scan(&count)

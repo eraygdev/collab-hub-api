@@ -13,10 +13,12 @@ import (
 	"golang.org/x/oauth2/google"
 )
 
-var googleOauthConfig *oauth2.Config
-var githubOauthConfig *oauth2.Config
+var (
+	googleOauthConfig *oauth2.Config
+	githubOauthConfig *oauth2.Config
+)
 
-// Google ve GitHub OAuth yapılandırmalarını .env'den okur.
+// initOAuth Google ve GitHub OAuth yapılandırmalarını .env'den okur.
 func initOAuth() {
 	googleOauthConfig = &oauth2.Config{
 		ClientID:     os.Getenv("GOOGLE_CLIENT_ID"),
@@ -34,8 +36,7 @@ func initOAuth() {
 	}
 }
 
-// UTF-8 güvenli truncate: karakter sayısına göre keser.
-// Multi-byte karakterleri (Türkçe ş/ğ/ü vb.) ortadan kesmez.
+// truncateRunes string'i rune bazlı keser (multi-byte karakterleri bozmaz).
 func truncateRunes(s string, max int) string {
 	runes := []rune(s)
 	if len(runes) <= max {
@@ -44,11 +45,11 @@ func truncateRunes(s string, max int) string {
 	return string(runes[:max])
 }
 
-// Kullanıcı için 7 gün geçerli imzalı JWT token üretir.
-func generateJWT(userID int, email, username string, isPremium bool) (string, error) {
+// generateJWT 7 gün geçerli imzalı JWT üretir.
+// Email kasıtlı olarak çıkarıldı — privacy.
+func generateJWT(userID int, username string, isPremium bool) (string, error) {
 	claims := jwt.MapClaims{
 		"user_id":    userID,
-		"email":      email,
 		"username":   username,
 		"is_premium": isPremium,
 		"exp":        time.Now().Add(7 * 24 * time.Hour).Unix(),
@@ -58,15 +59,16 @@ func generateJWT(userID int, email, username string, isPremium bool) (string, er
 	return token.SignedString([]byte(os.Getenv("JWT_SECRET")))
 }
 
-// Authorization header'ındaki JWT'yi doğrular, kullanıcı bilgisini context'e koyar.
+// authMiddleware JWT'yi doğrular, user_id ve username'i context'e koyar.
 func authMiddleware() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		authHeader := c.GetHeader("Authorization")
 		if authHeader == "" || len(authHeader) < 8 {
-			c.JSON(http.StatusUnauthorized, gin.H{"error": "missing token"})
+			c.JSON(http.StatusUnauthorized, gin.H{"error": "missing_token"})
 			c.Abort()
 			return
 		}
+
 		tokenString := authHeader[7:]
 		token, err := jwt.Parse(tokenString, func(t *jwt.Token) (interface{}, error) {
 			if _, ok := t.Method.(*jwt.SigningMethodHMAC); !ok {
@@ -75,42 +77,39 @@ func authMiddleware() gin.HandlerFunc {
 			return []byte(os.Getenv("JWT_SECRET")), nil
 		})
 		if err != nil || !token.Valid {
-			c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid token"})
-			c.Abort()
-			return
-		}
-		claims, ok := token.Claims.(jwt.MapClaims)
-		if !ok {
-			c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid claims"})
+			c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid_token"})
 			c.Abort()
 			return
 		}
 
-		if uid, ok := claims["user_id"].(float64); ok {
-			c.Set("user_id", int(uid))
-		} else {
-			c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid user_id"})
+		claims, ok := token.Claims.(jwt.MapClaims)
+		if !ok {
+			c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid_claims"})
 			c.Abort()
 			return
 		}
-		if email, ok := claims["email"].(string); ok {
-			c.Set("email", email)
+
+		uid, ok := claims["user_id"].(float64)
+		if !ok {
+			c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid_user_id"})
+			c.Abort()
+			return
 		}
+		c.Set("user_id", int(uid))
+
 		if username, ok := claims["username"].(string); ok {
 			c.Set("username", username)
 		}
+
 		c.Next()
 	}
 }
 
-// Opsiyonel auth middleware: token varsa doğrular ve context'e koyar,
-// token yoksa veya geçersizse hata vermez, userID = 0 olarak devam eder.
-// Public endpoint'lerde "starred" gibi kişiselleştirilmiş alanlar için kullanılır.
+// authMiddlewareOptional token varsa doğrular, yoksa misafir olarak devam eder.
 func authMiddlewareOptional() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		authHeader := c.GetHeader("Authorization")
 		if authHeader == "" || len(authHeader) < 8 {
-			// Token yok — misafir kullanıcı
 			c.Set("user_id", 0)
 			c.Next()
 			return
@@ -125,7 +124,6 @@ func authMiddlewareOptional() gin.HandlerFunc {
 		})
 
 		if err != nil || !token.Valid {
-			// Geçersiz token — misafir gibi davran
 			c.Set("user_id", 0)
 			c.Next()
 			return
