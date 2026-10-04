@@ -369,9 +369,24 @@ func handleCreateProject(c *gin.Context) {
 		return
 	}
 
-	// Proje limiti kontrolü
+	// Transaction başlat — limit kontrolü + INSERT aynı tx içinde olmalı
+	tx, err := db.Begin(ctx)
+	if err != nil {
+		serverError(c, err, "")
+		return
+	}
+	defer tx.Rollback(ctx)
+
+	// Advisory lock: Aynı kullanıcı için eşzamanlı create isteklerini serileştir.
+	// pg_advisory_xact_lock tx bitince otomatik serbest kalır.
+	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock($1)`, userID); err != nil {
+		serverError(c, err, "")
+		return
+	}
+
+	// Proje limiti kontrolü (tx içinde, lock altında)
 	var currentCount int
-	err := db.QueryRow(ctx,
+	err = tx.QueryRow(ctx,
 		`SELECT COUNT(*) FROM projects WHERE author_id = $1`, userID,
 	).Scan(&currentCount)
 	if err != nil {
@@ -387,13 +402,6 @@ func handleCreateProject(c *gin.Context) {
 		})
 		return
 	}
-
-	tx, err := db.Begin(ctx)
-	if err != nil {
-		serverError(c, err, "")
-		return
-	}
-	defer tx.Rollback(ctx)
 
 	var projectID int
 	err = tx.QueryRow(ctx, `
