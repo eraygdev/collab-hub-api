@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"log"
 
@@ -9,7 +10,15 @@ import (
 )
 
 // serverError sunucu hatası döner ve detayı log'a yazar.
+// Client bağlantıyı kestiyse (context canceled / deadline exceeded) sessizce çıkar.
 func serverError(c *gin.Context, err error, publicMsg string) {
+	// Client isteği iptal ettiyse — normal durum, log etme, cevap yazma.
+	// (React StrictMode, sayfa değişimi, mobil ağ kopması vb.)
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		c.Abort()
+		return
+	}
+
 	if publicMsg == "" {
 		publicMsg = "server_error"
 	}

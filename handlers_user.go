@@ -169,16 +169,15 @@ func handleGetUserByUsername(c *gin.Context) {
 	var (
 		userID     int
 		dbUsername string
-		email      string
 		avatarURL  string
 		bio        string
 		createdAt  time.Time
 	)
 
 	err := db.QueryRow(ctx, `
-		SELECT id, username, COALESCE(email, ''), COALESCE(avatar_url, ''), COALESCE(bio, ''), created_at
-		FROM users WHERE LOWER(username) = LOWER($1)
-	`, username).Scan(&userID, &dbUsername, &email, &avatarURL, &bio, &createdAt)
+    SELECT id, username, COALESCE(avatar_url, ''), COALESCE(bio, ''), created_at
+    FROM users WHERE LOWER(username) = LOWER($1)
+`, username).Scan(&userID, &dbUsername, &avatarURL, &bio, &createdAt)
 
 	if err != nil {
 		c.JSON(http.StatusNotFound, gin.H{"error": "user_not_found"})
@@ -267,7 +266,6 @@ func handleGetUserByUsername(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{
 		"user_id":    userID,
 		"username":   dbUsername,
-		"email":      email,
 		"avatar_url": avatarURL,
 		"bio":        bio,
 		"created_at": createdAt,

@@ -13,7 +13,6 @@ import (
 	"github.com/joho/godotenv"
 )
 
-// Uygulamayı başlatır: env yükle, DB bağlan, OAuth kur, route'ları bağla, sunucuyu çalıştır.
 func main() {
 	if err := godotenv.Load(); err != nil {
 		log.Println("Warning: .env file not found, using system environment variables")
@@ -40,7 +39,6 @@ func main() {
 		IdleTimeout:       60 * time.Second,
 	}
 
-	// Sunucuyu ayrı bir goroutine'de başlat
 	go func() {
 		log.Printf("Server running at http://localhost:%s", port)
 		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
@@ -48,13 +46,11 @@ func main() {
 		}
 	}()
 
-	// SIGINT (Ctrl+C) veya SIGTERM (Docker/k8s stop) bekle
 	quit := make(chan os.Signal, 1)
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
 	<-quit
 	log.Println("Shutting down server...")
 
-	// 5 saniye içinde aktif istekleri tamamla, sonra kapat
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 

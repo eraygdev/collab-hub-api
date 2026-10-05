@@ -209,6 +209,7 @@ func handleGetProject(c *gin.Context) {
 		Stars            int                      `json:"stars"`
 		Starred          bool                     `json:"starred"`
 		Contributors     int                      `json:"contributors"`
+		MaxContributors  int                      `json:"maxContributors"` // [YENİ]
 		Status           string                   `json:"status"`
 		CreatedAt        time.Time                `json:"createdAt"`
 		Author           string                   `json:"author"`
@@ -229,6 +230,7 @@ func handleGetProject(c *gin.Context) {
 			(SELECT COUNT(*) FROM project_stars WHERE project_id = p.id) AS stars,
 			EXISTS(SELECT 1 FROM project_stars WHERE project_id = p.id AND user_id = $2) AS starred,
 			(SELECT COUNT(*) FROM project_contributors WHERE project_id = p.id AND status = 'approved') AS contributors,
+			p.max_contributors,
 			p.status, p.created_at,
 			COALESCE(u.username, '') AS author,
 			COALESCE(u.avatar_url, '') AS author_avatar,
@@ -241,7 +243,7 @@ func handleGetProject(c *gin.Context) {
 	`, id, userID).Scan(
 		&project.ID, &project.Title, &project.Description, &project.LongDescription,
 		&project.GithubURL, &project.DemoURL, &project.ImageURL,
-		&project.Stars, &project.Starred, &project.Contributors, &project.Status, &project.CreatedAt,
+		&project.Stars, &project.Starred, &project.Contributors, &project.MaxContributors, &project.Status, &project.CreatedAt,
 		&project.Author, &project.AuthorAvatar, &project.AuthorID,
 		&project.Categories, &project.CategoryIDs,
 	)
@@ -301,6 +303,7 @@ func handleCreateProject(c *gin.Context) {
 		DemoURL         string `json:"demoUrl"`
 		ImageURL        string `json:"imageUrl"`
 		CategoryIDs     []int  `json:"categoryIds"`
+		MaxContributors int    `json:"maxContributors"` // [YENİ]
 	}
 
 	if err := c.ShouldBindJSON(&input); err != nil {
@@ -313,12 +316,21 @@ func handleCreateProject(c *gin.Context) {
 		return
 	}
 
+	// [YENİ] Katkıcı limiti validasyonu
+	if input.MaxContributors == 0 {
+		input.MaxContributors = DefaultContributorLimit
+	}
+	if !isAllowedContributorLimit(input.MaxContributors) {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid_contributor_limit"})
+		return
+	}
+
 	// Sanitize
 	input.Title = sanitizeText(input.Title)
 	input.Description = sanitizeText(input.Description)
 	input.LongDescription = sanitizeText(input.LongDescription)
 
-	// Metin validasyonları (min + max + regex)
+	// Metin validasyonları
 	if err := validateTextMinMax("title", input.Title, MinTitleLen, MaxTitleLen, TitleRegex, true); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
@@ -332,7 +344,7 @@ func handleCreateProject(c *gin.Context) {
 		return
 	}
 
-	// URL uzunluk + prefix kontrolü
+	// URL kontrolleri
 	if utf8.RuneCountInString(input.GithubURL) > MaxGithubURLLen {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "github_url_too_long"})
 		return
@@ -369,7 +381,7 @@ func handleCreateProject(c *gin.Context) {
 		return
 	}
 
-	// Transaction başlat — limit kontrolü + INSERT aynı tx içinde olmalı
+	// Transaction
 	tx, err := db.Begin(ctx)
 	if err != nil {
 		serverError(c, err, "")
@@ -377,14 +389,13 @@ func handleCreateProject(c *gin.Context) {
 	}
 	defer tx.Rollback(ctx)
 
-	// Advisory lock: Aynı kullanıcı için eşzamanlı create isteklerini serileştir.
-	// pg_advisory_xact_lock tx bitince otomatik serbest kalır.
+	// Advisory lock
 	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock($1)`, userID); err != nil {
 		serverError(c, err, "")
 		return
 	}
 
-	// Proje limiti kontrolü (tx içinde, lock altında)
+	// Proje limiti kontrolü
 	var currentCount int
 	err = tx.QueryRow(ctx,
 		`SELECT COUNT(*) FROM projects WHERE author_id = $1`, userID,
@@ -405,12 +416,13 @@ func handleCreateProject(c *gin.Context) {
 
 	var projectID int
 	err = tx.QueryRow(ctx, `
-		INSERT INTO projects (title, description, long_description, github_url, demo_url, image_url, author_id)
-		VALUES ($1, $2, $3, $4, $5, $6, $7)
+		INSERT INTO projects (title, description, long_description, github_url, demo_url, image_url, author_id, max_contributors)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
 		RETURNING id
 	`,
 		input.Title, input.Description, input.LongDescription,
 		input.GithubURL, input.DemoURL, input.ImageURL, userID,
+		input.MaxContributors, // [YENİ]
 	).Scan(&projectID)
 	if err != nil {
 		serverError(c, err, "")

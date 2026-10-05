@@ -24,6 +24,14 @@ const (
 	MaxProjectsPerUser = 10
 )
 
+// [YENİ] Katkıcı limitleri
+const (
+	DefaultContributorLimit = 10
+)
+
+// [YENİ] AllowedContributorLimits — create'te seçilebilecek değerler
+var AllowedContributorLimits = []int{5, 10, 20, 50}
+
 // Arama limitleri
 const (
 	MaxSearchLen = 100
@@ -42,3 +50,13 @@ var (
 	TextRegex     = regexp.MustCompile(`^[a-zA-Z0-9çÇğĞıİöÖşŞüÜ.,!?;:'"()\[\]{}\-_/|@#$%&*+=~\s]*$`)
 	BioRegex      = regexp.MustCompile(`^[a-zA-Z0-9çÇğĞıİöÖşŞüÜ.,!?;:'"()\[\]{}\-_/|@#$%&*+=~\s]*$`)
 )
+
+// [YENİ] isAllowedContributorLimit — değer izinli listede mi?
+func isAllowedContributorLimit(limit int) bool {
+	for _, allowed := range AllowedContributorLimits {
+		if limit == allowed {
+			return true
+		}
+	}
+	return false
+}

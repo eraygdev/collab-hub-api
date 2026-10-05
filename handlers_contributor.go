@@ -22,10 +22,15 @@ func handleJoinProject(c *gin.Context) {
 		return
 	}
 
-	var authorID int
-	err = db.QueryRow(ctx,
-		`SELECT author_id FROM projects WHERE id = $1`, projectID,
-	).Scan(&authorID)
+	// [YENİ] Tek sorguda author + max_contributors + mevcut katkıcı sayısı
+	var authorID, maxContributors, currentCount int
+	err = db.QueryRow(ctx, `
+		SELECT 
+			p.author_id,
+			p.max_contributors,
+			(SELECT COUNT(*) FROM project_contributors WHERE project_id = p.id AND status = 'approved')
+		FROM projects p WHERE p.id = $1
+	`, projectID).Scan(&authorID, &maxContributors, &currentCount)
 	if err != nil {
 		c.JSON(http.StatusNotFound, gin.H{"error": "project_not_found"})
 		return
@@ -33,6 +38,12 @@ func handleJoinProject(c *gin.Context) {
 
 	if authorID == userID {
 		c.JSON(http.StatusForbidden, gin.H{"error": "cannot_join_own_project"})
+		return
+	}
+
+	// [YENİ] Katkıcı limiti kontrolü
+	if currentCount >= maxContributors {
+		c.JSON(http.StatusForbidden, gin.H{"error": "contributor_limit_reached"})
 		return
 	}
 
