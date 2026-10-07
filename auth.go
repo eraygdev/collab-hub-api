@@ -4,29 +4,19 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/golang-jwt/jwt/v5"
 	"golang.org/x/oauth2"
 	"golang.org/x/oauth2/github"
-	"golang.org/x/oauth2/google"
 )
 
-var (
-	googleOauthConfig *oauth2.Config
-	githubOauthConfig *oauth2.Config
-)
+var githubOauthConfig *oauth2.Config
 
-// initOAuth Google ve GitHub OAuth yapılandırmalarını .env'den okur.
+// initOAuth GitHub OAuth yapılandırmasını .env'den okur.
 func initOAuth() {
-	googleOauthConfig = &oauth2.Config{
-		ClientID:     os.Getenv("GOOGLE_CLIENT_ID"),
-		ClientSecret: os.Getenv("GOOGLE_CLIENT_SECRET"),
-		RedirectURL:  os.Getenv("GOOGLE_OAUTH_REDIRECT_URL"),
-		Scopes:       []string{"openid", "email", "profile"},
-		Endpoint:     google.Endpoint,
-	}
 	githubOauthConfig = &oauth2.Config{
 		ClientID:     os.Getenv("GITHUB_CLIENT_ID"),
 		ClientSecret: os.Getenv("GITHUB_CLIENT_SECRET"),
@@ -63,7 +53,7 @@ func generateJWT(userID int, username string, isPremium bool) (string, error) {
 func authMiddleware() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		authHeader := c.GetHeader("Authorization")
-		if authHeader == "" || len(authHeader) < 8 {
+		if authHeader == "" || !strings.HasPrefix(authHeader, "Bearer ") {
 			c.JSON(http.StatusUnauthorized, gin.H{"error": "missing_token"})
 			c.Abort()
 			return
@@ -109,7 +99,7 @@ func authMiddleware() gin.HandlerFunc {
 func authMiddlewareOptional() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		authHeader := c.GetHeader("Authorization")
-		if authHeader == "" || len(authHeader) < 8 {
+		if authHeader == "" || !strings.HasPrefix(authHeader, "Bearer ") {
 			c.Set("user_id", 0)
 			c.Next()
 			return

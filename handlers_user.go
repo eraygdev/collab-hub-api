@@ -87,8 +87,8 @@ func handleUpdateMe(c *gin.Context) {
 		return
 	}
 
-	input.Username = strings.TrimSpace(input.Username)
-	input.Bio = strings.TrimSpace(input.Bio)
+	input.Username = sanitizeText(strings.TrimSpace(input.Username))
+	input.Bio = sanitizeText(strings.TrimSpace(input.Bio))
 
 	if input.Username == "" {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "username_empty"})

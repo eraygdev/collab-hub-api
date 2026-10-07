@@ -24,8 +24,6 @@ func registerRoutes(router *gin.Engine) {
 	{
 		auth.GET("/github/login", handleGithubLogin)
 		auth.GET("/github/callback", handleGithubCallback)
-		auth.GET("/google/login", handleGoogleLogin)
-		auth.GET("/google/callback", handleGoogleCallback)
 		auth.GET("/me", authMiddleware(), handleMe)
 	}
 

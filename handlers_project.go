@@ -358,17 +358,38 @@ func handleCreateProject(c *gin.Context) {
 		return
 	}
 
-	if input.GithubURL != "" && !strings.HasPrefix(input.GithubURL, "http") {
+	// GitHub URL zorunlu + public olmalı
+	if input.GithubURL == "" || strings.TrimSpace(input.GithubURL) == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "github_url_required"})
+		return
+	}
+	normalizedRepo := normalizeGithubRepoURL(input.GithubURL)
+	if normalizedRepo == "" {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid_github_url"})
 		return
 	}
-	if input.DemoURL != "" && !strings.HasPrefix(input.DemoURL, "http") {
+	if err := checkGithubRepoPublic(normalizedRepo); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	input.GithubURL = normalizedRepo
+	if input.DemoURL != "" &&
+		!strings.HasPrefix(input.DemoURL, "http://") &&
+		!strings.HasPrefix(input.DemoURL, "https://") {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid_demo_url"})
 		return
 	}
-	if input.ImageURL != "" && !strings.HasPrefix(input.ImageURL, "http") {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid_image_url"})
-		return
+	if input.ImageURL != "" {
+		normalized := normalizeGithubImageURL(input.ImageURL)
+		if normalized == "" || !isValidGithubImageURL(normalized) {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "image_url_must_be_github"})
+			return
+		}
+		if err := checkGithubImageSize(normalized); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
+		input.ImageURL = normalized
 	}
 
 	if len(input.CategoryIDs) > MaxCategories {
@@ -698,17 +719,36 @@ func handleUpdateProject(c *gin.Context) {
 		return
 	}
 
-	if input.GithubURL != "" && !strings.HasPrefix(input.GithubURL, "http") {
+	// GitHub URL zorunlu + public olmalı
+	if input.GithubURL == "" || strings.TrimSpace(input.GithubURL) == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "github_url_required"})
+		return
+	}
+	normalizedRepo := normalizeGithubRepoURL(input.GithubURL)
+	if normalizedRepo == "" {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid_github_url"})
 		return
 	}
+	if err := checkGithubRepoPublic(normalizedRepo); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	input.GithubURL = normalizedRepo
 	if input.DemoURL != "" && !strings.HasPrefix(input.DemoURL, "http") {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid_demo_url"})
 		return
 	}
-	if input.ImageURL != "" && !strings.HasPrefix(input.ImageURL, "http") {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid_image_url"})
-		return
+	if input.ImageURL != "" {
+		normalized := normalizeGithubImageURL(input.ImageURL)
+		if normalized == "" || !isValidGithubImageURL(normalized) {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "image_url_must_be_github"})
+			return
+		}
+		if err := checkGithubImageSize(normalized); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
+		input.ImageURL = normalized
 	}
 
 	if len(input.CategoryIDs) > MaxCategories {

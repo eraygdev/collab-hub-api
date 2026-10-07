@@ -20,6 +20,7 @@ const (
 	MaxGithubURLLen    = 200
 	MaxDemoURLLen      = 200
 	MaxImageURLLen     = 300
+	MaxImageSizeBytes  = 2 * 1024 * 1024 // 2 MB
 	MaxCategories      = 5
 	MaxProjectsPerUser = 10
 )

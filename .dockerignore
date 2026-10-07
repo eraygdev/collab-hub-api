@@ -1,0 +1,33 @@
+# Git
+.git
+.gitignore
+.gitattributes
+
+# Env (ÇOK ÖNEMLİ — image'a ASLA girmemeli)
+.env
+.env.*
+!.env.example
+
+# Belgeler
+*.md
+README.md
+
+# Docker dosyaları (build context'te gerek yok)
+Dockerfile
+docker-compose.yml
+.dockerignore
+
+# IDE
+.vscode
+.idea
+
+# Export/dump dosyaları
+*.txt
+Backend-Export.txt
+
+# Loglar
+*.log
+
+# Test
+*_test.go
+coverage.out

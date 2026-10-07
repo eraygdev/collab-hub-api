@@ -333,6 +333,8 @@ func handleRemoveContributor(c *gin.Context) {
 		return
 	}
 
+	auditLog(c, userID, "remove_contributor", "project", projectID)
+
 	c.JSON(http.StatusOK, gin.H{"message": "contributor_removed"})
 }
 
