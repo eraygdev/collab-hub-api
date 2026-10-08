@@ -64,7 +64,7 @@ func handleListProjects(c *gin.Context) {
 	}
 
 	matchMode := c.DefaultQuery("mode", "or")
-
+	sortParam := c.DefaultQuery("sort", "popular")
 	conditions := []string{}
 	args := []interface{}{userID}
 	argIdx := 2
@@ -111,6 +111,27 @@ func handleListProjects(c *gin.Context) {
 	offsetIdx := argIdx + 1
 	args = append(args, limit, offset)
 
+	orderClause := "p.created_at DESC, p.id DESC" // default: newest
+
+	if sortParam == "popular" {
+		orderClause = "COALESCE(s.stars, 0) DESC, p.created_at DESC, p.id DESC"
+	} else if sortParam == "trending" {
+		orderClause = `
+			(SELECT COUNT(*) FROM project_stars
+			 WHERE project_id = p.id
+			   AND created_at > NOW() - INTERVAL '24 hours') DESC,
+			COALESCE(s.stars, 0) DESC,
+			p.created_at DESC,
+			p.id DESC
+		`
+	} else if sortParam == "hot" {
+		orderClause = `
+			(COALESCE(s.stars, 0) * 1.0 + COALESCE(c.contributors, 0) * 3.0 + 1)
+			/ POWER(EXTRACT(EPOCH FROM (NOW() - p.created_at)) / 3600.0 + 24, 1.5)
+			DESC, p.id DESC
+		`
+	}
+
 	query := fmt.Sprintf(`
 		SELECT 
 			p.id, p.title, p.description,
@@ -128,6 +149,11 @@ func handleListProjects(c *gin.Context) {
 			SELECT COUNT(*) AS stars, BOOL_OR(user_id = $1) AS starred
 			FROM project_stars WHERE project_id = p.id
 		) s ON true
+			LEFT JOIN LATERAL (
+		SELECT COUNT(*) AS contributors
+		FROM project_contributors
+		WHERE project_id = p.id AND status = 'approved'
+		) c ON true
 		LEFT JOIN LATERAL (
 			SELECT 
 				ARRAY_AGG(c.name ORDER BY c.name) AS names,
@@ -137,9 +163,9 @@ func handleListProjects(c *gin.Context) {
 			WHERE pc.project_id = p.id
 		) cat ON true
 		%s
-		ORDER BY p.created_at DESC, p.id DESC
+		ORDER BY %s
 		LIMIT $%d OFFSET $%d
-	`, whereClause, limitIdx, offsetIdx)
+	`, whereClause, orderClause, limitIdx, offsetIdx)
 
 	rows, err := db.Query(ctx, query, args...)
 	if err != nil {
