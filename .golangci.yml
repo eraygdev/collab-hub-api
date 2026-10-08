@@ -1,0 +1,22 @@
+run:
+  timeout: 5m
+
+linters:
+  enable:
+    - govet
+    - errcheck
+    - staticcheck
+    - unused
+    - ineffassign
+    - misspell
+    - gofmt
+    - goimports
+  disable:
+    - exhaustive
+
+issues:
+  exclude-rules:
+    # Test dosyalarında errcheck zorunlu değil
+    - path: _test\.go
+      linters:
+        - errcheck

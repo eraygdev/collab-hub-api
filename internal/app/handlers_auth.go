@@ -52,7 +52,10 @@ func handleGithubCallback(c *gin.Context) {
 
 	body, _ := io.ReadAll(resp.Body)
 	var info map[string]interface{}
-	json.Unmarshal(body, &info)
+	if err := json.Unmarshal(body, &info); err != nil {
+		serverError(c, err, "auth_failed")
+		return
+	}
 
 	login, _ := info["login"].(string)
 	avatar, _ := info["avatar_url"].(string)
@@ -74,7 +77,7 @@ func handleGithubCallback(c *gin.Context) {
 			defer emailResp.Body.Close()
 			emailBody, _ := io.ReadAll(emailResp.Body)
 			var emails []map[string]interface{}
-			json.Unmarshal(emailBody, &emails)
+			_ = json.Unmarshal(emailBody, &emails)
 			for _, e := range emails {
 				if primary, _ := e["primary"].(bool); primary {
 					email, _ = e["email"].(string)

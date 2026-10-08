@@ -434,7 +434,7 @@ func handleCreateProject(c *gin.Context) {
 		serverError(c, err, "")
 		return
 	}
-	defer tx.Rollback(ctx)
+	defer func() { _ = tx.Rollback(ctx) }()
 
 	// Advisory lock
 	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock($1)`, userID); err != nil {
@@ -533,7 +533,7 @@ func handleMyProjects(c *gin.Context) {
 	}
 
 	var totalProjects, totalStars, totalContributors int
-	db.QueryRow(ctx, `
+	_ = db.QueryRow(ctx, `
 		SELECT 
 			(SELECT COUNT(*) FROM projects WHERE author_id = $1),
 			COALESCE((SELECT SUM((SELECT COUNT(*) FROM project_stars WHERE project_id = p.id)) FROM projects p WHERE p.author_id = $1), 0),
@@ -646,7 +646,7 @@ func handleStarProject(c *gin.Context) {
 	}
 
 	var count int
-	db.QueryRow(ctx, `SELECT COUNT(*) FROM project_stars WHERE project_id = $1`, projectID).Scan(&count)
+	_ = db.QueryRow(ctx, `SELECT COUNT(*) FROM project_stars WHERE project_id = $1`, projectID).Scan(&count)
 
 	c.JSON(http.StatusOK, gin.H{"stars": count, "starred": true})
 }
@@ -671,7 +671,7 @@ func handleUnstarProject(c *gin.Context) {
 	}
 
 	var count int
-	db.QueryRow(ctx, `SELECT COUNT(*) FROM project_stars WHERE project_id = $1`, projectID).Scan(&count)
+	_ = db.QueryRow(ctx, `SELECT COUNT(*) FROM project_stars WHERE project_id = $1`, projectID).Scan(&count)
 
 	c.JSON(http.StatusOK, gin.H{"stars": count, "starred": false})
 }
@@ -796,7 +796,7 @@ func handleUpdateProject(c *gin.Context) {
 		serverError(c, err, "")
 		return
 	}
-	defer tx.Rollback(ctx)
+	defer func() { _ = tx.Rollback(ctx) }()
 
 	_, err = tx.Exec(ctx, `
 		UPDATE projects
@@ -878,7 +878,7 @@ func handleDeleteProject(c *gin.Context) {
 
 	// Silme sonrası güncel proje sayısı
 	var newCount int
-	db.QueryRow(ctx, `SELECT COUNT(*) FROM projects WHERE author_id = $1`, userID).Scan(&newCount)
+	_ = db.QueryRow(ctx, `SELECT COUNT(*) FROM projects WHERE author_id = $1`, userID).Scan(&newCount)
 
 	c.JSON(http.StatusOK, gin.H{
 		"message":      "project_deleted",

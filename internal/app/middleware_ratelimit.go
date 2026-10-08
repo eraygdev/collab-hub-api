@@ -49,22 +49,15 @@ func (store *RateLimiterStore) cleanupStale(interval, maxIdle time.Duration) {
 	for range ticker.C {
 		store.mu.Lock()
 		now := time.Now()
-		removed := 0
 
 		for ip, last := range store.lastSeen {
 			if now.Sub(last) > maxIdle {
 				delete(store.limiters, ip)
 				delete(store.lastSeen, ip)
-				removed++
 			}
 		}
 
 		store.mu.Unlock()
-
-		if removed > 0 {
-			// İsteğe bağlı log — istersen kaldırabilirsin
-			// log.Printf("[RATE LIMIT] %d pasif IP temizlendi", removed)
-		}
 	}
 }
 

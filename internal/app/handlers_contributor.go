@@ -50,12 +50,13 @@ func handleJoinProject(c *gin.Context) {
 	}
 
 	var isPremium bool
-	db.QueryRow(ctx, `SELECT is_premium FROM users WHERE id = $1`, userID).Scan(&isPremium)
+	_ = db.QueryRow(ctx, `SELECT is_premium FROM users WHERE id = $1`, userID).Scan(&isPremium)
 
 	var input struct {
 		Message string `json:"message"`
 	}
-	c.ShouldBindJSON(&input)
+	// Body parse edilemezse input boş kalır — premium mesajı yok sayılır
+	_ = c.ShouldBindJSON(&input)
 
 	message := ""
 	if isPremium {
@@ -285,7 +286,7 @@ func handleRequestAction(c *gin.Context, action string) {
 			serverError(c, err, "")
 			return
 		}
-		defer tx.Rollback(ctx)
+		defer func() { _ = tx.Rollback(ctx) }()
 
 		// Proje satırını kilitle + limit kontrolü
 		var projectID, maxContrib, currentCount int

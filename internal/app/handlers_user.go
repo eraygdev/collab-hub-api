@@ -56,7 +56,7 @@ func handleMe(c *gin.Context) {
 	}
 
 	var projectCount int
-	db.QueryRow(c.Request.Context(),
+	_ = db.QueryRow(c.Request.Context(),
 		`SELECT COUNT(*) FROM projects WHERE author_id = $1`, userID,
 	).Scan(&projectCount)
 
@@ -185,7 +185,7 @@ func handleGetUserByUsername(c *gin.Context) {
 	}
 
 	var totalProjects, totalStars, totalContributors int
-	db.QueryRow(ctx, `
+	_ = db.QueryRow(ctx, `
 		SELECT 
 			(SELECT COUNT(*) FROM projects WHERE author_id = $1),
 			COALESCE((SELECT SUM((SELECT COUNT(*) FROM project_stars WHERE project_id = p.id)) FROM projects p WHERE p.author_id = $1), 0),
