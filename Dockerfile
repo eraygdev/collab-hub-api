@@ -18,7 +18,7 @@ COPY . .
 RUN CGO_ENABLED=0 GOOS=linux go build \
     -a -installsuffix cgo \
     -ldflags="-s -w" \
-    -o reporeef-api .
+    -o reporeef-api ./cmd/server
 
 # ═══════════════════════════════════════════════════════
 # STAGE 2: RUNTIME

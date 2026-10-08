@@ -24,7 +24,11 @@ jobs:
       - name: Vet
         run: go vet ./...
 
+      - name: Test
+        run: go test ./... -race -coverprofile=coverage.out
+
       - name: Lint with golangci-lint
         uses: golangci/golangci-lint-action@v6
         with:
           version: v1.62.0
+          args: --timeout=5m

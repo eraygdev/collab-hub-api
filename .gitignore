@@ -1,6 +1,4 @@
 # Logs
-.env
-.env.example
 logs
 *.log
 npm-debug.log*
@@ -26,6 +24,7 @@ dist-ssr
 *.sw?
 
 .env
+.env.example
 .env.local
 .env.*.local
 
@@ -56,3 +55,4 @@ Thumbs.db
 # Export script ve çıktısı
 export_b.py
 backend_export.md
+EOF
