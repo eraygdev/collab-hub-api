@@ -3,8 +3,11 @@ package app
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log"
 
+	"github.com/getsentry/sentry-go"
+	sentrygin "github.com/getsentry/sentry-go/gin"
 	"github.com/gin-gonic/gin"
 	"github.com/jackc/pgx/v5/pgconn"
 )
@@ -22,6 +25,19 @@ func serverError(c *gin.Context, err error, publicMsg string) {
 	if publicMsg == "" {
 		publicMsg = "server_error"
 	}
+
+	// Sentry'ye gönder — request context'inden hub'ı al
+	if hub := sentrygin.GetHubFromContext(c); hub != nil {
+		hub.WithScope(func(scope *sentry.Scope) {
+			scope.SetTag("path", c.Request.URL.Path)
+			scope.SetTag("method", c.Request.Method)
+			if uid := c.GetInt("user_id"); uid > 0 {
+				scope.SetUser(sentry.User{ID: fmt.Sprintf("%d", uid)})
+			}
+			hub.CaptureException(err)
+		})
+	}
+
 	log.Printf("[ERROR] %s %s: %v", c.Request.Method, c.Request.URL.Path, err)
 	c.JSON(500, gin.H{"error": publicMsg})
 }

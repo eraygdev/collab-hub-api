@@ -9,6 +9,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/getsentry/sentry-go"
 	"github.com/joho/godotenv"
 
 	"github.com/eraygdev/reporeef-api/internal/app"
@@ -17,6 +18,24 @@ import (
 func main() {
 	if err := godotenv.Load(); err != nil {
 		log.Println("Warning: .env file not found, using system environment variables")
+	}
+
+	// Sentry başlat — DSN yoksa atla (lokal dev için)
+	if dsn := os.Getenv("SENTRY_DSN"); dsn != "" {
+		err := sentry.Init(sentry.ClientOptions{
+			Dsn:              dsn,
+			Environment:      os.Getenv("ENV"),
+			Release:          "reporeef-api@1.0.0",
+			TracesSampleRate: 0.1, // 10% tracing sample
+		})
+		if err != nil {
+			log.Printf("Sentry initialization failed: %v", err)
+		} else {
+			log.Println("Sentry initialized")
+			defer sentry.Flush(2 * time.Second)
+		}
+	} else {
+		log.Println("SENTRY_DSN not set — Sentry disabled")
 	}
 
 	app.Connect()
