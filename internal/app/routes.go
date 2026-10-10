@@ -56,7 +56,7 @@ func NewRouter() *gin.Engine {
 
 	router.GET("/ping", handlePing)
 
-	api := router.Group("/api")
+	api := router.Group("/api/" + APIVersion)
 
 	// Auth
 	auth := api.Group("/auth")

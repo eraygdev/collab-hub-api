@@ -2,6 +2,11 @@ package app
 
 import "regexp"
 
+// ─────────────────────────────────────────────────────────
+// API VERSION
+// ─────────────────────────────────────────────────────────
+const APIVersion = "v1"
+
 // Profil limitleri
 const (
 	MinUsernameLen = 3
